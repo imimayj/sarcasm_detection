@@ -4,3 +4,8 @@ matplotlib
 tensorflow
 autokeras
 ipykernel
+tensorrt
+transformers
+contractions
+pandas
+nltk
