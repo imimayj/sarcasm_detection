@@ -1,11 +1,10 @@
+pandas
 numpy
 scikit-learn
 matplotlib
-tensorflow
-autokeras
 ipykernel
-tensorrt
 transformers
 contractions
-pandas
 nltk
+pytorch-lightning
+evaluate
