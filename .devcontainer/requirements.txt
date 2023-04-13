@@ -8,3 +8,5 @@ contractions
 nltk
 pytorch-lightning
 evaluate
+finetuning-scheduler
+torchmetrics

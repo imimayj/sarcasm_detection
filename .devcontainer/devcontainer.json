@@ -14,7 +14,7 @@
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
 	// "forwardPorts": [],
 	// Use 'postCreateCommand' to run commands after the container is created.
-	"postCreateCommand": "pip3 install -r .devcontainer/requirements_1.txt",
+	"postCreateCommand": "pip install --upgrade pip && pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 && pip install -r .devcontainer/requirements.txt",
 	"customizations": {
 		"vscode": {
 			"settings": {
