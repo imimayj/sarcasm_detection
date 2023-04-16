@@ -10,3 +10,4 @@ pytorch-lightning
 evaluate
 finetuning-scheduler
 torchmetrics
+tensorboard
