@@ -11,3 +11,4 @@ evaluate
 finetuning-scheduler
 torchmetrics
 tensorboard
+pytorch-lightning-bolts
