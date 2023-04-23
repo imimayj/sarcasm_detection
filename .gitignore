@@ -1,3 +1,6 @@
 hparams.yaml
 metrics.csv
 epoch=*-step=*
+sarcasm_detection_finetune_ckpt_v*
+events.out.tfevents.*
+fine_tuned_model_ckpt*
