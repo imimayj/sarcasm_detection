@@ -25,17 +25,21 @@ from transformers import (
     get_cosine_schedule_with_warmup,
     get_linear_schedule_with_warmup,
 )
+from transformers.models.electra.modeling_electra import ElectraClassificationHead
 
 data_path = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/Sarcasm_Headlines_Dataset_v2.json"
 sub_data_path_train = "/workspaces/sarcasm_detection/notebooks/project_data/train.csv"
 sub_data_path_test = "/workspaces/sarcasm_detection/notebooks/project_data/test.csv"
-version_number = 2
+version_number = 4
 sub_version_number = 0
 current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/sarcasm_detection_finetune_ckpt_v{version_number}_{current_time}.ckpt"
 sub_checkpoint_path = f"/workspaces/sarcasm_detection/notebooks/checkpoints/subcat_finetune_ckpt_v{sub_version_number}_{current_time}.ckpt"
 checkpoint_directory = os.path.dirname(checkpoint_path)
 logdir = "/workspaces/sarcasm_detection/sarcasm_detection/tb_logs"
+save_directory = (
+    f"/workspaces/sarcasm_detection/sarcasm_detection/saved_models/sarcasm_model_v{version_number}_{current_time}"
+)
 
 
 class SarcasmDataset(Dataset):
@@ -142,6 +146,7 @@ class ElectraClassifier(pl.LightningModule):
 
         serialiazable_hparams = {"num_labels": num_labels, "batch_size": batch_size, "learning_rate": learning_rate}
         self.save_hyperparameters(serialiazable_hparams)
+        self.model_name_or_path = model_name
         self.model = ElectraForSequenceClassification.from_pretrained(model_name, num_labels=num_labels)
         self.data_module = data_module
         self.num_layers = self.model.config.num_hidden_layers
@@ -283,6 +288,10 @@ class ElectraClassifier(pl.LightningModule):
         return torch.stack(inputs), torch.stack(labels)
 
     @property
+    def config(self):
+        return self.model.config
+
+    @property
     def current_lr(self):
         return self.optimizers().param_groups[0]["lr"]
 
@@ -327,6 +336,10 @@ class ElectraClassifier(pl.LightningModule):
         #     },
         #     "monitor": "train_loss",
         # }
+
+    def update_classification_head(self, num_labels):
+        self.model.classifier = ElectraClassificationHead(self.model.config, num_labels)
+        self.num_labels = num_labels
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -379,6 +392,8 @@ def fit(model, data_module):
     trainer.fit(model, data_module)
 
     trainer.save_checkpoint(checkpoint_path)
+    base_model = model.model.base_model
+    base_model.save_pretrained(save_directory)
     return model, data_module
 
 

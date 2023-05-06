@@ -6,6 +6,7 @@ import pickle
 import re
 import string
 import subprocess
+from pathlib import Path
 
 import contractions
 import evaluate
@@ -28,11 +29,12 @@ from pytorch_lightning import Callback, Trainer
 from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelSummary
 from pytorch_lightning.loggers import TensorBoardLogger
 from sklearn.model_selection import train_test_split
+from torch.nn import CrossEntropyLoss
 from torch.nn.functional import cross_entropy
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts, LambdaLR, OneCycleLR
 from torch.utils.data import DataLoader, Dataset, TensorDataset, random_split
-from torchmetrics import Accuracy, Precision, Recall
+from torchmetrics import Accuracy, F1Score, Precision, Recall
 from torchmetrics.classification import BinaryAccuracy, BinaryF1Score
 from transformers import (
     AdamW,
@@ -46,6 +48,8 @@ from transformers import (
     get_cosine_schedule_with_warmup,
     get_linear_schedule_with_warmup,
 )
+from transformers.modeling_outputs import SequenceClassifierOutput
+from transformers.models.electra.modeling_electra import ElectraClassificationHead
 
 data_path = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/Sarcasm_Headlines_Dataset_v2.json"
 sub_data_path_train = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/train.csv"
@@ -57,6 +61,9 @@ checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/
 sub_checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/subcat_finetune_ckpt_v{sub_version_number}_{current_time}.ckpt"
 checkpoint_directory = os.path.dirname(checkpoint_path)
 logdir = "/workspaces/sarcasm_detection/sarcasm_detection/tb_logs"
+save_directory = (
+    f"/workspaces/sarcasm_detection/sarcasm_detection/saved_models/sarcasm_model_v{version_number}_{current_time}"
+)
 
 
 # data module
@@ -70,8 +77,23 @@ class SubcategoryDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
+        # text = self.data[idx]["tweet"]
+        # keys = ["sarcasm", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]
+        # labels = [self.data[idx][key] for key in keys]
+        # encodings = self.tokenizer(
+        #     text,
+        #     max_length=self.max_length,
+        #     padding="max_length",
+        #     truncation=True,
+        #     return_attention_mask=True,
+        #     return_token_type_ids=False,
+        #     return_tensors="pt",
+        # )
+        # return encodings["input_ids"].squeeze(), encodings["attention_mask"].squeeze(), torch.tensor(labels)
+
         text = self.data[idx]["tweet"]
-        labels = self.data[idx]["sarcastic"]
+        keys = ["sarcasm", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]
+        labels = [self.data[idx][key] for key in keys]
         encodings = self.tokenizer(
             text,
             max_length=self.max_length,
@@ -81,7 +103,11 @@ class SubcategoryDataset(Dataset):
             return_token_type_ids=False,
             return_tensors="pt",
         )
-        return encodings["input_ids"].flatten(), encodings["attention_mask"].flatten(), torch.tensor(labels)
+        return (
+            encodings["input_ids"].squeeze(),
+            encodings["attention_mask"].squeeze(),
+            torch.tensor(labels).unsqueeze(0),
+        )
 
 
 class SarcasmSubDataModule(pl.LightningDataModule):
@@ -96,39 +122,81 @@ class SarcasmSubDataModule(pl.LightningDataModule):
     def remove_twitter_handles(self, text):
         return re.sub(r"@[\w]+", "account_name", text)
 
+    def remove_urls(self, text):
+        return re.sub(r"http\S+", " ", text)
+
+    def remove_contractions(self, text):
+        return contractions.fix(text)
+
     def prepare_data(self):
-        col_types = {"tweet": "str", "sarcastic": "int32"}
+        x_col_types = {
+            "tweet": "str",
+            "sarcasm": "int32",
+            "irony": "int32",
+            "satire": "int32",
+            "understatement": "int32",
+            "overstatement": "int32",
+            "rhetorical_question": "int32",
+        }
 
         df = (
             pd.read_csv(self.train_data_path)
             .drop(
                 columns=[
                     "rephrase",
-                    "sarcasm",
-                    "irony",
-                    "satire",
-                    "understatement",
-                    "overstatement",
-                    "rhetorical_question",
+                    # "Unnamed:0",
+                    "sarcastic",
                 ]
             )
-            .astype(col_types)
+            .fillna(0)
+            .astype(x_col_types)
         )
 
-        df["tweet"] = df["tweet"].apply(self.remove_twitter_handles)
+        df["tweet"] = df["tweet"].apply(
+            lambda x: self.remove_contractions(self.remove_urls(self.remove_twitter_handles(x)))
+        )
 
         train_df, val_df = self.split_datasets(df)
-        print(train_df.head(10))
 
-        col_types = {"text": "str", "sarcasm": "int32"}
+        # print class distribution in datasets:
+
+        # print("training dataset class distribution:")
+        # for label in ["sarcasm", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]:
+        #     train_class_counts = train_df[label].value_counts()
+        #     print(f"{label}:")
+        #     print(train_class_counts)
+
+        # print("training dataset class distribution:")
+        # for label in ["sarcasm", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]:
+        #     val_class_counts = val_df[label].value_counts()
+        #     print(f"{label}:")
+        #     print(val_class_counts)
+
+        y_col_types = {
+            "text": "str",
+            "sarcasm": "int32",
+            "irony": "int32",
+            "satire": "int32",
+            "understatement": "int32",
+            "overstatement": "int32",
+            "rhetorical_question": "int32",
+        }
 
         test_df = (
             pd.read_csv(self.test_data_path)
-            .drop(columns=["irony", "satire", "understatement", "overstatement", "rhetorical_question"])
-            .astype(col_types)
+            # .drop(columns=["irony", "satire", "understatement", "overstatement", "rhetorical_question"])
+            .fillna(0).astype(y_col_types)
         )
 
-        test_df["text"] = test_df["text"].apply(self.remove_twitter_handles)
+        test_df["text"] = test_df["text"].apply(
+            lambda x: self.remove_contractions(self.remove_urls(self.remove_twitter_handles(x)))
+        )
+
+        # print("training dataset class distribution:")
+        # for label in ["sarcasm", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]:
+        #     test_class_counts = test_df[label].value_counts()
+        #     print(f"{label}:")
+        #     print(test_class_counts)
 
         # print(f"training df length: {len(train_df)}")
         # print(f"Validation DataFrame length: {len(val_df)}")
@@ -184,6 +252,7 @@ class CustomElectraClassifier(ElectraClassifier):
 
         if electra_classifier is not None:
             self.model = electra_classifier.model
+            self.update_classification_head(num_labels)
         else:
             raise ValueError("An ElectraClassifier must be instantiated")
 
@@ -194,9 +263,11 @@ class CustomElectraClassifier(ElectraClassifier):
         # self.model = model_name.from_pretrained(model_name, num_labels=num_labels)
         self.data_module = data_module
         self.num_layers = len(list(self.parameters()))
-        self.electra = electra_classifier.model
+        self.electra = electra_classifier
         self.warmup_steps = None
         self.learning_rate = learning_rate
+        self.classifier = self.model.classifier
+        self.loss_fct = nn.CrossEntropyLoss()
 
         # self.additional_layer_1 = electra_classifier.additional_layer_1
         # self.activation = electra_classifier.activation
@@ -205,22 +276,22 @@ class CustomElectraClassifier(ElectraClassifier):
         # self.predictions = []
         # self.targets = []
 
-        for param in self.model.parameters():
+        for param in self.electra.base_model.parameters():
             param.requires_grad = False
 
         for param in self.model.classifier.parameters():
             param.requires_grad = True
 
         # metrics
-        self.train_accuracy = Accuracy(task="binary", num_classes=num_labels)
-        self.val_accuracy = Accuracy(task="binary", num_classes=num_labels)
-        self.test_accuracy = Accuracy(task="binary", num_classes=num_labels)
-        self.train_precision = Precision(task="binary", num_classes=num_labels, average="weighted")
-        self.val_precision = Precision(task="binary", num_classes=num_labels, average="weighted")
-        self.train_recall = Recall(task="binary", num_classes=num_labels, average="weighted")
-        self.val_recall = Recall(task="binary", num_classes=num_labels, average="weighted")
-        self.val_f1_score = BinaryF1Score(task="binary", num_classes=num_labels)
-        self.f1 = BinaryF1Score(task="binary", num_classes=num_labels, average="macro")
+        self.train_accuracy = Accuracy(task="multiclass", num_classes=num_labels, subset_accuracy=True)
+        self.val_accuracy = Accuracy(task="multiclass", num_classes=num_labels, subset_accuracy=True)
+        self.test_accuracy = Accuracy(task="multiclass", num_classes=num_labels, subset_accuracy=True)
+        self.train_precision = Precision(task="multiclass", num_classes=num_labels, average="macro")
+        self.val_precision = Precision(task="multiclass", num_classes=num_labels, average="macro")
+        self.train_recall = Recall(task="multiclass", num_classes=num_labels, average="macro")
+        self.val_recall = Recall(task="multiclass", num_classes=num_labels, average="macro")
+        self.val_f1_score = F1Score(task="multiclass", num_classes=num_labels)
+        self.f1 = F1Score(task="multiclass", num_classes=num_labels, average="macro")
 
         # for adding smaller networks on top
         # self.dropout = nn.Dropout(0.1)
@@ -230,6 +301,12 @@ class CustomElectraClassifier(ElectraClassifier):
     @property
     def electra(self):
         return self.model.electra
+
+    def update_classification_head(self, num_labels):
+        config = self.model.config
+        config.num_labels = num_labels
+        new_classifier = ElectraClassificationHead(config)
+        self.model.classifier = new_classifier
 
     def train_dataloader(self):
         return self.data_module.train_dataloader()
@@ -244,8 +321,15 @@ class CustomElectraClassifier(ElectraClassifier):
         return self.data_module.predict_dataloader()
 
     def forward(self, input_ids, attention_mask, labels=None):
-        return self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        outputs = self.electra(input_ids, attention_mask=attention_mask)
+        logits = self.classifier(outputs[0])
 
+        if labels is not None:
+            labels = labels[:, 0, 0]  # Extract the correct label from the labels tensor
+            loss = self.loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            return loss
+        else:
+            return logits
         # for adding smaller networks on top
         # outputs = self.electra(input_ids, attention_mask)
         # x = self.activation(self.additional_layer_1(outputs.logits))
@@ -263,9 +347,10 @@ class CustomElectraClassifier(ElectraClassifier):
 
     def training_step(self, batch, batch_idx):
         input_ids, attention_mask, labels = batch
-        outputs = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        loss = outputs.loss
-        preds = outputs.logits.argmax(dim=-1)
+        loss = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        logits = self(input_ids=input_ids, attention_mask=attention_mask)
+        preds = (torch.sigmoid(logits) > 0.5).int()  # Convert probabilities to binary predictions
+        labels = labels.squeeze(1)  # Extract the correct labels and ensure the shape is (N, 6)
 
         # logging
         acc = self.train_accuracy(preds, labels)
@@ -278,25 +363,88 @@ class CustomElectraClassifier(ElectraClassifier):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        input_ids, attention_mask, labels = batch
-        outputs = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        loss = outputs.loss
-        preds = outputs.logits.argmax(dim=-1)
+        # input_ids, attention_mask, labels = batch
+        # loss = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        # logits = self(input_ids=input_ids, attention_mask=attention_mask)
+        # preds = torch.argmax(logits, dim=1)
+        # labels = labels.to(torch.long).view(-1)
 
-        # logging
+        # # logging
+        # acc = self.val_accuracy(preds, labels)
+        # prec = self.val_precision(preds, labels)
+        # rec = self.val_recall(preds, labels)
+        # self.log("val_loss", loss, on_step=True, prog_bar=True)
+        # self.log("val_accuracy", acc)
+        # self.log("val_precision", prec)
+        # self.log("val_recall", rec)
+        input_ids, attention_mask, labels = batch
+        logits = self(input_ids=input_ids, attention_mask=attention_mask)  # Get logits
+        print("logits shape:", logits.shape)  # Print logits shape
+        print("labels shape:", labels.shape)  # Print labels shape
+
+        labels = labels[:, 0, 0]  # Extract the correct label from the labels tensor
+        loss = self.loss_fct(logits.view(-1, self.num_labels), labels.view(-1))  # Compute loss
+
+        preds = torch.argmax(logits, dim=1)
+        labels = labels.to(torch.long).view(-1)  # Modify the shape of the labels tensor
+
         acc = self.val_accuracy(preds, labels)
-        prec = self.val_precision(preds, labels)
-        rec = self.val_recall(preds, labels)
-        self.log("val_loss", loss)
+        prec = self.val_precision(preds, labels).mean()
+        rec = self.val_recall(preds, labels).mean()
+        self.log("val_loss", loss, on_step=True, prog_bar=True)
         self.log("val_accuracy", acc)
         self.log("val_precision", prec)
         self.log("val_recall", rec)
+
+    # def training_step(self, batch, batch_idx):
+    #     input_ids, attention_mask, labels = batch
+    #     logits = self(input_ids=input_ids, attention_mask=attention_mask)
+    #     loss_fct = nn.CrossEntropyLoss()
+    #     loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+    #     # self.log("train_loss", loss)
+    #     # input_ids, attention_mask, labels = batch
+    #     # outputs = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+    #     # loss = outputs.loss
+    #     preds = logits.argmax(dim=-1)
+
+    #     # logging
+    #     acc = self.train_accuracy(preds, labels)
+    #     prec = self.train_precision(preds, labels)
+    #     rec = self.train_recall(preds, labels)
+    #     self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+    #     self.log("train_accuracy", acc, on_step=True, on_epoch=True, prog_bar=True)
+    #     self.log("train_precision", prec, on_step=True, on_epoch=True, prog_bar=True)
+    #     self.log("train_recall", rec, on_step=True, on_epoch=True, prog_bar=True)
+    #     return loss
+
+    # def validation_step(self, batch, batch_idx):
+    #     input_ids, attention_mask, labels = batch
+    #     logits = self(input_ids=input_ids, attention_mask=attention_mask)
+    #     loss_fct = nn.CrossEntropyLoss()
+    #     loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+    #     # self.log("val_loss", loss, on_step=True, on_epoch=True)
+    #     # input_ids, attention_mask, labels = batch
+    #     # print(f"Input shape: {input_ids.shape}")  # Add this line
+    #     # print(f"Target shape: {labels.shape}")  # Add this line
+    #     # labels = labels.view(-1)
+    #     # outputs = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+    #     # loss = outputs.loss
+    #     preds = logits.argmax(dim=-1)
+
+    #     # logging
+    #     acc = self.val_accuracy(preds, labels)
+    #     prec = self.val_precision(preds, labels)
+    #     rec = self.val_recall(preds, labels)
+    #     self.log("val_loss", loss, on_step=True, prog_bar=True)
+    #     self.log("val_accuracy", acc)
+    #     self.log("val_precision", prec)
+    #     self.log("val_recall", rec)
 
     def test_step(self, batch, batch_idx):
         input_ids, attention_mask, labels = batch
         outputs = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         # loss = outputs.loss
-        preds = outputs.logits.argmax(dim=-1)
+        preds = outputs.logits.argmax(dim=1)
         acc = self.test_accuracy(preds, labels)
         # prec = self.val_precision(preds, labels)
         # rec = self.val_recall(preds, labels)
@@ -322,7 +470,7 @@ class CustomElectraClassifier(ElectraClassifier):
     def predict_step(self, batch, batch_idx):
         input_ids, attention_mask, labels = batch
         outputs = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        preds = outputs.logits.argmax(dim=-1)
+        preds = outputs.logits.argmax(dim=1)
         self.predictions.append(preds.detach().cpu())
         self.targets.append(labels.detach().cpu())
         f1_score = self.f1(preds, labels)
@@ -396,10 +544,32 @@ def find_latest_checkpoint(version_prefix="sarcasm_detection_finetune_ckpt_v"):
     )
 
 
-sub_data_module = SarcasmSubDataModule(data_path=[sub_data_path_train, sub_data_path_test], batch_size=32)
+def find_most_recent_model(saved_models_dir):
+    model_dirs = [
+        Path(saved_models_dir) / d for d in os.listdir(saved_models_dir) if os.path.isdir(Path(saved_models_dir) / d)
+    ]
+    most_recent_model_dir = max(model_dirs, key=os.path.getctime)
+    return most_recent_model_dir
 
 
-def load_model(saved_data_module, transfer_data_module):
+def load_model(transfer_data_module, saved_data_module):  # also saved_data_module
+    # saved_models_dir = "/workspaces/sarcasm_detection/sarcasm_detection/saved_models/"
+    # most_recent_model_dir = find_most_recent_model(saved_models_dir)
+    # config = ElectraConfig.from_pretrained(most_recent_model_dir)
+    # base_model = ElectraModel.from_pretrained(most_recent_model_dir, config=config)
+
+    # new_num_labels = 6
+    # config.num_labels = new_num_labels
+    # new_model = ElectraForSequenceClassification.from_pretrained(most_recent_model_dir, config=config)
+
+    # transfer_model = CustomElectraClassifier(
+    #     electra_classifier=new_model,
+    #     data_module=transfer_data_module,
+    #     num_labels=new_num_labels,
+    #     batch_size=transfer_data_module.batch_size,
+    #     learning_rate=5e-6,
+    # )
+    # return transfer_model
     latest_checkpoint = find_latest_checkpoint()
 
     if latest_checkpoint:
@@ -412,7 +582,7 @@ def load_model(saved_data_module, transfer_data_module):
         transfer_model = CustomElectraClassifier(
             electra_classifier=loaded_model,
             data_module=transfer_data_module,
-            num_labels=2,
+            num_labels=6,
             batch_size=transfer_data_module.batch_size,
             learning_rate=5e-6,
         )
