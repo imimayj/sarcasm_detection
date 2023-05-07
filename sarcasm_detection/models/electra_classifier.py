@@ -2,6 +2,7 @@ import datetime
 import os
 import subprocess
 
+import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import tensorboard
@@ -30,7 +31,7 @@ from transformers.models.electra.modeling_electra import ElectraClassificationHe
 data_path = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/Sarcasm_Headlines_Dataset_v2.json"
 sub_data_path_train = "/workspaces/sarcasm_detection/notebooks/project_data/train.csv"
 sub_data_path_test = "/workspaces/sarcasm_detection/notebooks/project_data/test.csv"
-version_number = 4
+version_number = 5
 sub_version_number = 0
 current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/sarcasm_detection_finetune_ckpt_v{version_number}_{current_time}.ckpt"
@@ -154,12 +155,18 @@ class ElectraClassifier(pl.LightningModule):
         self.learning_rate = learning_rate
         self.batch_size = batch_size
         self.num_labels = num_labels or data_module.num_labels
+        self.best_val_performance = -np.inf
+        self.epochs_since_best_performance = 0
+        self.patience = 2
+        self.current_unfreeze_idx = int(len(list(self.model.electra.parameters())))
+        self.unfreeze_step = 1
         # self.epoch_train_losses = []
 
         for param in self.model.electra.parameters():
             param.requires_grad = False
 
         # metrics
+        self.val_loss = None
         self.train_accuracy = Accuracy(task="binary", num_classes=num_labels)
         self.val_accuracy = Accuracy(task="binary", num_classes=num_labels)
         self.test_accuracy = Accuracy(task="binary", num_classes=num_labels)
@@ -191,15 +198,11 @@ class ElectraClassifier(pl.LightningModule):
     def on_train_batch_start(self, batch, batch_idx):
         if self.global_step == self.warmup_steps:
             # unfreeze base layers
+            self.current_unfreeze_idx = int(len(list(self.model.electra.parameters())) * 0.9)
+            self.unfreeze_next_layer()
+
             optimizer = self.optimizers()
-            num_params = len(list(self.model.electra.parameters()))
-            freeze_idx = int(num_params * 0.8)
-            print(num_params)
-            unfreeze_idx = int(num_params * 0.8)
-            print(unfreeze_idx)
-            for idx, param in enumerate(self.model.electra.parameters()):
-                if idx >= unfreeze_idx:
-                    param.requires_grad = True
+            freeze_idx = int(len(list(self.model.electra.parameters())) * 0.9)
 
             for idx, param_group in enumerate(optimizer.param_groups):
                 if self.global_step < self.warmup_steps:
@@ -242,6 +245,33 @@ class ElectraClassifier(pl.LightningModule):
         self.log("val_accuracy", acc, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_precision", prec, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_recall", rec, on_step=False, on_epoch=True, prog_bar=True)
+
+        self.val_loss = loss.item()
+
+    def on_validation_epoch_end(self):
+        current_val_performance = self.val_loss
+        if current_val_performance > self.best_val_performance:
+            self.best_val_performance = current_val_performance
+            self.epochs_since_best_performance = 0
+        else:
+            self.epochs_since_best_performance += 1
+
+        if self.epochs_since_best_performance >= self.patience:
+            self.unfreeze_next_layer()
+
+    def unfreeze_next_layer(self):
+        num_params = len(list(self.model.electra.parameters()))
+        freeze_idx = int(num_params * 0.9)
+        unfreeze_idx = self.current_unfreeze_idx
+
+        if unfreeze_idx < freeze_idx:
+            self.current_unfreeze_idx += self.unfreeze_step
+
+            for idx, param in enumerate(self.model.electra.parameters()):
+                if idx >= unfreeze_idx and idx < self.current_unfreeze_idx:
+                    param_requires_grad = True
+
+            print(f"unfroze layers up to idx {self.current_unfreeze_idx}")
 
     def test_step(self, batch, batch_idx):
         input_ids, attention_mask, labels = batch
@@ -394,7 +424,7 @@ def fit(model, data_module):
     trainer.save_checkpoint(checkpoint_path)
     base_model = model.model.base_model
     base_model.save_pretrained(save_directory)
-    return model, data_module
+    return model
 
 
 def test(model, data_module):
@@ -439,6 +469,8 @@ def main():
     model = fit(model, data_module)
 
     tensorboard_process.terminate()
+
+    model = test(model, data_module)
 
 
 if __name__ == "__main__":

@@ -36,7 +36,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmResta
 from torch.utils.data import DataLoader, Dataset, TensorDataset, random_split
 from torchmetrics import Accuracy, F1Score, Precision, Recall
 from torchmetrics.classification import BinaryAccuracy, BinaryF1Score
-from transformers import (
+from transformers import (  # cosine_schedule_with_warmup,; get_linear_schedule_with_warmup,
     AdamW,
     AutoTokenizer,
     DataCollatorWithPadding,
@@ -45,8 +45,6 @@ from transformers import (
     ElectraModel,
     ElectraTokenizer,
     TrainingArguments,
-    get_cosine_schedule_with_warmup,
-    get_linear_schedule_with_warmup,
 )
 from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.models.electra.modeling_electra import ElectraClassificationHead
@@ -55,7 +53,7 @@ data_path = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/Sarcas
 sub_data_path_train = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/train.csv"
 sub_data_path_test = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/test.csv"
 version_number = 2
-sub_version_number = 2
+sub_version_number = 4
 current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/sarcasm_detection_finetune_ckpt_v{version_number}_{current_time}.ckpt"
 sub_checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/subcat_finetune_ckpt_v{sub_version_number}_{current_time}.ckpt"
@@ -91,7 +89,10 @@ class SubcategoryDataset(Dataset):
         # )
         # return encodings["input_ids"].squeeze(), encodings["attention_mask"].squeeze(), torch.tensor(labels)
 
-        text = self.data[idx]["tweet"]
+        text_key = "tweet" if "tweet" in self.data[idx] else "text"
+        text = self.data[idx][text_key]
+
+        # text = self.data[idx]["tweet"]
         keys = ["sarcasm", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]
         labels = [self.data[idx][key] for key in keys]
         encodings = self.tokenizer(
@@ -166,7 +167,7 @@ class SarcasmSubDataModule(pl.LightningDataModule):
         #     print(f"{label}:")
         #     print(train_class_counts)
 
-        # print("training dataset class distribution:")
+        # print("validation dataset class distribution:")
         # for label in ["sarcasm", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]:
         #     val_class_counts = val_df[label].value_counts()
         #     print(f"{label}:")
@@ -192,13 +193,13 @@ class SarcasmSubDataModule(pl.LightningDataModule):
             lambda x: self.remove_contractions(self.remove_urls(self.remove_twitter_handles(x)))
         )
 
-        # print("training dataset class distribution:")
+        # print("test dataset class distribution:")
         # for label in ["sarcasm", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]:
         #     test_class_counts = test_df[label].value_counts()
         #     print(f"{label}:")
         #     print(test_class_counts)
 
-        # print(f"training df length: {len(train_df)}")
+        # print(f"test df length: {len(train_df)}")
         # print(f"Validation DataFrame length: {len(val_df)}")
         # print(f"Test DataFrame length: {len(test_df)}")
         # print(f"total df len: {len(train_df+val_df+test_df)}")
@@ -268,6 +269,8 @@ class CustomElectraClassifier(ElectraClassifier):
         self.learning_rate = learning_rate
         self.classifier = self.model.classifier
         self.loss_fct = nn.CrossEntropyLoss()
+        self.predictions = []
+        self.f1_scores = []
 
         # self.additional_layer_1 = electra_classifier.additional_layer_1
         # self.activation = electra_classifier.activation
@@ -345,6 +348,12 @@ class CustomElectraClassifier(ElectraClassifier):
     def on_train_batch_start(self, batch, batch_idx):
         pass
 
+    def on_validation_epoch_end(self):
+        pass
+
+    def unfreeze_next_layer(self):
+        pass
+
     def training_step(self, batch, batch_idx):
         input_ids, attention_mask, labels = batch
         loss = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
@@ -363,24 +372,8 @@ class CustomElectraClassifier(ElectraClassifier):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        # input_ids, attention_mask, labels = batch
-        # loss = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        # logits = self(input_ids=input_ids, attention_mask=attention_mask)
-        # preds = torch.argmax(logits, dim=1)
-        # labels = labels.to(torch.long).view(-1)
-
-        # # logging
-        # acc = self.val_accuracy(preds, labels)
-        # prec = self.val_precision(preds, labels)
-        # rec = self.val_recall(preds, labels)
-        # self.log("val_loss", loss, on_step=True, prog_bar=True)
-        # self.log("val_accuracy", acc)
-        # self.log("val_precision", prec)
-        # self.log("val_recall", rec)
         input_ids, attention_mask, labels = batch
         logits = self(input_ids=input_ids, attention_mask=attention_mask)  # Get logits
-        print("logits shape:", logits.shape)  # Print logits shape
-        print("labels shape:", labels.shape)  # Print labels shape
 
         labels = labels[:, 0, 0]  # Extract the correct label from the labels tensor
         loss = self.loss_fct(logits.view(-1, self.num_labels), labels.view(-1))  # Compute loss
@@ -396,63 +389,27 @@ class CustomElectraClassifier(ElectraClassifier):
         self.log("val_precision", prec)
         self.log("val_recall", rec)
 
-    # def training_step(self, batch, batch_idx):
-    #     input_ids, attention_mask, labels = batch
-    #     logits = self(input_ids=input_ids, attention_mask=attention_mask)
-    #     loss_fct = nn.CrossEntropyLoss()
-    #     loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-    #     # self.log("train_loss", loss)
-    #     # input_ids, attention_mask, labels = batch
-    #     # outputs = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-    #     # loss = outputs.loss
-    #     preds = logits.argmax(dim=-1)
-
-    #     # logging
-    #     acc = self.train_accuracy(preds, labels)
-    #     prec = self.train_precision(preds, labels)
-    #     rec = self.train_recall(preds, labels)
-    #     self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-    #     self.log("train_accuracy", acc, on_step=True, on_epoch=True, prog_bar=True)
-    #     self.log("train_precision", prec, on_step=True, on_epoch=True, prog_bar=True)
-    #     self.log("train_recall", rec, on_step=True, on_epoch=True, prog_bar=True)
-    #     return loss
-
-    # def validation_step(self, batch, batch_idx):
-    #     input_ids, attention_mask, labels = batch
-    #     logits = self(input_ids=input_ids, attention_mask=attention_mask)
-    #     loss_fct = nn.CrossEntropyLoss()
-    #     loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-    #     # self.log("val_loss", loss, on_step=True, on_epoch=True)
-    #     # input_ids, attention_mask, labels = batch
-    #     # print(f"Input shape: {input_ids.shape}")  # Add this line
-    #     # print(f"Target shape: {labels.shape}")  # Add this line
-    #     # labels = labels.view(-1)
-    #     # outputs = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-    #     # loss = outputs.loss
-    #     preds = logits.argmax(dim=-1)
-
-    #     # logging
-    #     acc = self.val_accuracy(preds, labels)
-    #     prec = self.val_precision(preds, labels)
-    #     rec = self.val_recall(preds, labels)
-    #     self.log("val_loss", loss, on_step=True, prog_bar=True)
-    #     self.log("val_accuracy", acc)
-    #     self.log("val_precision", prec)
-    #     self.log("val_recall", rec)
-
     def test_step(self, batch, batch_idx):
         input_ids, attention_mask, labels = batch
-        outputs = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        # loss = outputs.loss
-        preds = outputs.logits.argmax(dim=1)
+        logits = self(input_ids=input_ids, attention_mask=attention_mask)  # Get logits
+        # print("logits shape:", logits.shape)  # Print logits shape
+        # print("labels shape:", labels.shape)  # Print labels shape
+
+        labels = labels[:, 0, 0]  # Extract the correct label from the labels tensor
+        loss = self.loss_fct(logits.view(-1, self.num_labels), labels.view(-1))  # Compute loss
+
+        preds = torch.argmax(logits, dim=1)
+        labels = labels.to(torch.long).view(-1)  # Modify the shape of the labels tensor
+
+        f1_score = self.f1(preds, labels)
         acc = self.test_accuracy(preds, labels)
-        # prec = self.val_precision(preds, labels)
-        # rec = self.val_recall(preds, labels)
+
         self.predictions.append(preds.detach().cpu())
         self.targets.append(labels.detach().cpu())
-        f1_score = self.f1(preds, labels)
-        print("logits test_step:", outputs.logits)
+        self.f1_scores.append(f1_score.detach().cpu())
+        print("logits test_step:", logits)
         print("predictions test_step:", preds)
+        self.log("test_loss", loss, on_step=True, prog_bar=True)
         self.log("test_f1", f1_score, on_step=True, on_epoch=True, prog_bar=True)
         self.log("test_accuracy", acc, on_step=True, on_epoch=True, prog_bar=True)
 
@@ -470,7 +427,8 @@ class CustomElectraClassifier(ElectraClassifier):
     def predict_step(self, batch, batch_idx):
         input_ids, attention_mask, labels = batch
         outputs = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        preds = outputs.logits.argmax(dim=1)
+        preds = torch.sigmoid(outputs).int().unsqueeze(-1)
+        labels = labels.squeeze(1)
         self.predictions.append(preds.detach().cpu())
         self.targets.append(labels.detach().cpu())
         f1_score = self.f1(preds, labels)
@@ -492,18 +450,6 @@ class CustomElectraClassifier(ElectraClassifier):
 
     def configure_optimizers(self):
         optimizer = AdamW(self.parameters(), lr=self.hparams.learning_rate)
-
-        # scheduler = get_linear_schedule_with_warmup(
-        #     optimizer,
-        #     num_warmup_steps=self.warmup_steps,
-        #     num_training_steps=self.trainer.estimated_stepping_batches
-        # )
-
-        # scheduler = {
-        #     'scheduler': scheduler,
-        #     'interval': 'step',
-        #     'frequency': 1
-        # }
         return optimizer
 
     def __getstate__(self):
@@ -599,10 +545,10 @@ def fit(model, data_module):
     lr_monitor = LearningRateMonitor(logging_interval="step")
     logger = TensorBoardLogger(save_dir=logdir, name=f"esubcat_model_v{sub_version_number}")
     metrics_callback = MetricsCallback()
-    early_stopping = EarlyStopping("val_loss", patience=5, verbose=True)
+    early_stopping = EarlyStopping("val_loss", patience=3, verbose=True)
 
     trainer = Trainer(
-        max_epochs=100,
+        max_epochs=5,
         callbacks=[
             lr_monitor,
             metrics_callback,
@@ -614,7 +560,7 @@ def fit(model, data_module):
     trainer.fit(model, data_module)
 
     trainer.save_checkpoint(sub_checkpoint_path)
-    return model, data_module
+    return model
 
 
 def test(model, data_module):
@@ -623,10 +569,11 @@ def test(model, data_module):
 
     test_result = trainer.test(model, data_module)
     print(test_result)
+    return model.predictions, model.f1_scores
 
 
-def get_f1_scores(predict_result):
-    f1_scores = [f1_score for (_batch_preds, f1_score) in predict_result]
+def get_f1_scores(predictions, f1_scores):
+    # f1_scores = [f1_score for (_batch_preds, f1_score) in predict_result]
     f1_scores = torch.mean(torch.stack(f1_scores))
     return f1_scores
 
@@ -660,6 +607,8 @@ def main():
         tensorboard_process = launch_tensorboard(logdir)
         transfer_model = fit(transfer_model, sub_data_module)
         tensorboard_process.terminate()
+        predictions, f1_scores = test(transfer_model, sub_data_module)
+        print(get_f1_scores(predictions, f1_scores))
     else:
         print("failed to load the transfer model")
 
