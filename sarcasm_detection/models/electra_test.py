@@ -3,7 +3,6 @@ import json
 import math
 import os
 import pickle
-import random
 import re
 import string
 import subprocess
@@ -30,13 +29,12 @@ from pytorch_lightning import Callback, Trainer
 from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelSummary
 from pytorch_lightning.loggers import TensorBoardLogger
 from sklearn.model_selection import train_test_split
-from sklearn.utils import compute_class_weight
 from torch.nn import CrossEntropyLoss
 from torch.nn.functional import cross_entropy
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CyclicLR, ReduceLROnPlateau
-from torch.utils.data import DataLoader, Dataset, TensorDataset, WeightedRandomSampler, random_split
-from torchmetrics import AUROC, Accuracy, F1Score, Precision, Recall
+from torch.optim import AdamW, lr_scheduler
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.utils.data import DataLoader, Dataset, TensorDataset, random_split
+from torchmetrics import Accuracy, F1Score, Precision, Recall
 from torchmetrics.classification import BinaryAccuracy, BinaryF1Score
 from transformers import (  # cosine_schedule_with_warmup,; get_linear_schedule_with_warmup,
     AdamW,
@@ -46,8 +44,6 @@ from transformers import (  # cosine_schedule_with_warmup,; get_linear_schedule_
     ElectraForSequenceClassification,
     ElectraModel,
     ElectraTokenizer,
-    MarianMTModel,
-    MarianTokenizer,
     TrainingArguments,
 )
 from transformers.modeling_outputs import SequenceClassifierOutput
@@ -57,7 +53,7 @@ data_path = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/Sarcas
 sub_data_path_train = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/train.csv"
 sub_data_path_test = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/test.csv"
 version_number = 2
-sub_version_number = 6
+sub_version_number = 4
 current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/sarcasm_detection_finetune_ckpt_v{version_number}_{current_time}.ckpt"
 sub_checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/subcat_finetune_ckpt_v{sub_version_number}_{current_time}.ckpt"
@@ -128,7 +124,7 @@ class SarcasmSubDataModule(pl.LightningDataModule):
         return re.sub(r"@[\w]+", "account_name", text)
 
     def remove_urls(self, text):
-        return re.sub(r"http\S+", "http", text)
+        return re.sub(r"http\S+", " ", text)
 
     def remove_contractions(self, text):
         return contractions.fix(text)
@@ -269,17 +265,21 @@ class CustomElectraClassifier(ElectraClassifier):
         self.data_module = data_module
         self.num_layers = len(list(self.parameters()))
         self.electra = electra_classifier
-        self.dropout = nn.Dropout(0.5)
         self.warmup_steps = None
         self.learning_rate = learning_rate
         self.classifier = self.model.classifier
-        # self.loss_fct = nn.CrossEntropyLoss()
-
-        self.loss = nn.BCEWithLogitsLoss()
+        self.loss_fct = nn.BCEWithLogitsLoss()
         self.predictions = []
+        self.f1_scores = []
         self.f1_macro_scores = []
         self.f1_classes_scores = []
-        self.num_labels = num_labels
+
+        # self.additional_layer_1 = electra_classifier.additional_layer_1
+        # self.activation = electra_classifier.activation
+        # self.classifier = nn.Linear(64, num_labels)
+        # self.dropout = nn.Dropout(0)
+        # self.predictions = []
+        # self.targets = []
 
         for param in self.electra.base_model.parameters():
             param.requires_grad = False
@@ -288,20 +288,6 @@ class CustomElectraClassifier(ElectraClassifier):
             param.requires_grad = True
 
         # metrics
-        print(f"num_labels: {num_labels}, type:{type(num_labels)}")
-
-        # self.train_auroc = AUROC(task="multilabel", num_labels=num_labels, average="macro")
-        self.train_precision = Precision(
-            task="multilabel",
-            num_labels=num_labels,
-            average="macro",
-        )
-        self.val_precision = Precision(
-            task="multilabel",
-            num_labels=num_labels,
-            average="macro",
-        )
-        # self.val_auroc = AUROC(task="multilabel", num_labels=num_labels, average="macro")
         self.train_recall = Recall(task="multilabel", num_labels=num_labels, average="macro")
         self.val_recall = Recall(task="multilabel", num_labels=num_labels, average="macro")
 
@@ -316,6 +302,11 @@ class CustomElectraClassifier(ElectraClassifier):
         # self.test_auroc = AUROC(task="multilabel", num_labels=num_labels, average=None)
 
         self.f1 = F1Score(task="multilabel", num_labels=num_labels, average="macro")
+
+        # for adding smaller networks on top
+        # self.dropout = nn.Dropout(0.1)
+        # self.fc1 = nn.Linear(self.electra.config.hidden_size, 128)
+        # self.fc2 = nn.Linear(128, num_labels)
 
     @property
     def electra(self):
@@ -339,21 +330,12 @@ class CustomElectraClassifier(ElectraClassifier):
     def predict_dataloader(self):
         return self.data_module.predict_dataloader()
 
-    def forward(self, input_ids, attention_mask, labels):
+    def forward(self, input_ids, attention_mask, labels=None):
         outputs = self.electra(input_ids, attention_mask=attention_mask)
-        dropout_outputs = self.dropout(outputs[0])
-        logits = self.classifier(dropout_outputs)
-        loss = self.loss(logits, labels.float())
-        return logits, loss
-
-        # if labels is not None:
-        #     labels = labels[:, 0, 0]  # Extract the correct label from the labels tensor
-        #     loss = self.loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-        #     return loss
-        # else:
-        #     return logits
+        logits = self.classifier(outputs[0])
 
         if labels is not None:
+            labels = labels.squeeze(1)  # Remove the extra dimension
             loss = self.loss_fct(logits, labels.float())
             return loss
         else:
@@ -382,15 +364,16 @@ class CustomElectraClassifier(ElectraClassifier):
     def training_step(self, batch, batch_idx):
         input_ids, attention_mask, labels = batch
         labels = labels.squeeze(1)
-        logits, loss = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        # preds = (torch.sigmoid(logits) > 0.5).int()  # Convert probabilities to binary predictions
+        loss = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        logits = self(input_ids=input_ids, attention_mask=attention_mask)
+        preds = (
+            torch.sigmoid(logits) > 0.5
+        )  # Convert probabilities to binary predictions  # Extract the correct labels and ensure the shape is (N, 6)
 
-        # labels = labels.squeeze(1)  # Extract the correct labels and ensure the shape is (N, 6)
-        # print(f"training labels shape: {labels.shape}, labels: {labels}")
         # logging
-        # arc = self.train_auroc(preds, labels)
-        prec = self.train_precision(logits, labels)
-        rec = self.train_recall(logits, labels)
+        # acc = self.train_accuracy(preds, labels)
+        prec = self.train_precision(preds, labels)
+        rec = self.train_recall(preds, labels)
         f1_macro = self.train_f1_macro(logits, labels)
         f1_classes = self.train_f1_classes(logits, labels)
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -405,20 +388,15 @@ class CustomElectraClassifier(ElectraClassifier):
     def validation_step(self, batch, batch_idx):
         input_ids, attention_mask, labels = batch
         labels = labels.squeeze(1)
-        logits, loss = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)  # Get logits
+        logits = self(input_ids=input_ids, attention_mask=attention_mask)  # Get logits
 
-        # labels = labels[:, 0, 0]  # Extract the correct label from the labels tensor
-        # labels_one_hot = F.one_hot(labels, num_classes=self.num_labels)
-        # # print(f"validation labels shape: {labels_one_hot.shape}, labels: {labels}")
-        # loss = self.loss_fct(logits.view(-1, self.num_labels), labels.view(-1))  # Compute loss
+        loss = self.loss_fct(logits, labels.float())  # Compute loss
 
-        # preds = torch.argmax(logits, dim=1)
-        # labels = labels.to(torch.long).view(-1)  # Modify the shape of the labels tensor
+        preds = torch.sigmoid(logits) > 0.5
 
-        # print(f"validation labels shape after to(torch.long): {labels.shape}, labels: {labels}")
-        # arc = self.val_auroc(preds, labels)
-        prec = self.val_precision(logits, labels).mean()
-        rec = self.val_recall(logits, labels).mean()
+        acc = self.val_accuracy(preds, labels)
+        prec = self.val_precision(preds, labels).mean()
+        rec = self.val_recall(preds, labels).mean()
         f1_macro = self.val_f1_macro(logits, labels)
         f1_classes = self.val_f1_classes(logits, labels)
         self.log("val_loss", loss, on_step=True, prog_bar=True)
@@ -432,18 +410,17 @@ class CustomElectraClassifier(ElectraClassifier):
     def test_step(self, batch, batch_idx):
         input_ids, attention_mask, labels = batch
         labels = labels.squeeze(1)
-        logits, loss = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)  # Get logits
+        logits = self(input_ids=input_ids, attention_mask=attention_mask)  # Get logits
         # print("logits shape:", logits.shape)  # Print logits shape
         # print("labels shape:", labels.shape)  # Print labels shape
 
-        # labels = labels[:, 0, 0]  # Extract the correct label from the labels tensor
-        # loss = self.loss_fct(logits.view(-1, self.num_labels), labels.view(-1))  # Compute loss
-        # # print(f"test labels shape: {labels.shape}, labels: {labels}")
-        # preds = torch.argmax(logits, dim=1)
-        # labels = labels.to(torch.long).view(-1)  # Modify the shape of the labels tensor
-        preds = (logits > 0.5).long()
+        loss = self.loss_fct(logits, labels.float())  # Compute loss
 
-        # print(f"test labels shape after to(torch.long): {labels.shape}, labels: {labels}")
+        preds = torch.sigmoid(logits) > 0.5
+
+        f1_score = self.f1(preds, labels)
+        acc = self.test_accuracy(preds, labels)
+
         f1_macro = self.test_f1_macro(preds, labels)
         f1_classes = self.test_f1_classes(preds, labels)
         # arc = self.test_auroc(preds, labels)
@@ -467,7 +444,7 @@ class CustomElectraClassifier(ElectraClassifier):
 
     def on_test_epoch_end(self):
         print("predictions on_test_epoch_end:", self.predictions)
-        print("targets on_test_epoch_end", self.targets)
+        # print("targets on_test_epoch_end", self.targets)
         all_preds = torch.cat(self.predictions)
         all_labels = torch.cat(self.targets)
         return {"preds": all_preds, "labels": all_labels}
@@ -498,23 +475,8 @@ class CustomElectraClassifier(ElectraClassifier):
 
     def configure_optimizers(self):
         optimizer = AdamW(self.parameters(), lr=self.hparams.learning_rate)
-
+        scheduler = ReduceLROnPlateau(optimizer, mode="max", factor=0.1, patience=5, verbose=True)
         return optimizer
-
-        # scheduler = ReduceLROnPlateau(optimizer, mode="max", factor=0.1, patience=5, verbose=True)
-
-        # # return optimizer
-
-        # return {
-        #     "optimizer": optimizer,
-        #     "lr_scheduler": {
-        #         "scheduler": scheduler,
-        #         "monitor": "Macro F1_epoch",
-        #         "interval": "epoch",
-        #         "frequency": 1,
-        #         "strict": True,
-        #     },
-        # }
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -563,6 +525,23 @@ def find_most_recent_model(saved_models_dir):
 
 
 def load_model(transfer_data_module, saved_data_module):  # also saved_data_module
+    # saved_models_dir = "/workspaces/sarcasm_detection/sarcasm_detection/saved_models/"
+    # most_recent_model_dir = find_most_recent_model(saved_models_dir)
+    # config = ElectraConfig.from_pretrained(most_recent_model_dir)
+    # base_model = ElectraModel.from_pretrained(most_recent_model_dir, config=config)
+
+    # new_num_labels = 6
+    # config.num_labels = new_num_labels
+    # new_model = ElectraForSequenceClassification.from_pretrained(most_recent_model_dir, config=config)
+
+    # transfer_model = CustomElectraClassifier(
+    #     electra_classifier=new_model,
+    #     data_module=transfer_data_module,
+    #     num_labels=new_num_labels,
+    #     batch_size=transfer_data_module.batch_size,
+    #     learning_rate=5e-6,
+    # )
+    # return transfer_model
     latest_checkpoint = find_latest_checkpoint()
 
     if latest_checkpoint:
@@ -577,7 +556,7 @@ def load_model(transfer_data_module, saved_data_module):  # also saved_data_modu
             data_module=transfer_data_module,
             num_labels=6,
             batch_size=transfer_data_module.batch_size,
-            learning_rate=1e-6,
+            learning_rate=5e-6,
         )
 
         transfer_model.model.electra.load_state_dict(loaded_model.model.electra.state_dict())
@@ -595,7 +574,7 @@ def fit(model, data_module):
     early_stopping = EarlyStopping("val_loss", patience=3, verbose=True)
 
     trainer = Trainer(
-        max_epochs=100,
+        max_epochs=5,
         callbacks=[
             lr_monitor,
             metrics_callback,
@@ -623,7 +602,7 @@ def get_f1_scores(predictions, macro_f1_scores, classes_f1_scores):
     # f1_scores = [f1_score for (_batch_preds, f1_score) in predict_result]
     macro_f1_scores = torch.mean(torch.stack(macro_f1_scores))
     classes_f1_scores = torch.mean(torch.stack(classes_f1_scores))
-    return macro_f1_scores, classes_f1_scores
+    return predictions, macro_f1_scores, classes_f1_scores
 
 
 # predicting
@@ -648,7 +627,7 @@ def launch_tensorboard(logdir):
 
 def main():
     saved_data_module = SarcasmDataModule(data_path=data_path, batch_size=16)
-    sub_data_module = SarcasmSubDataModule(data_path=[sub_data_path_train, sub_data_path_test], batch_size=16)
+    sub_data_module = SarcasmSubDataModule(data_path=[sub_data_path_train, sub_data_path_test], batch_size=32)
     transfer_model = load_model(saved_data_module=saved_data_module, transfer_data_module=sub_data_module)
     if transfer_model is not None:
         logdir = "/workspaces/sarcasm_detection/sarcasm_detection/tb_logs"
@@ -657,6 +636,9 @@ def main():
         tensorboard_process.terminate()
         predictions, macro_f1_scores, classes_f1_scores = test(transfer_model, sub_data_module)
         print(get_f1_scores(predictions, macro_f1_scores, classes_f1_scores))
+        predictions[0].tolist()
+        with open("predictions.json", "w") as f:
+            json.dump(predictions, f)
     else:
         print("failed to load the transfer model")
 

@@ -86,6 +86,24 @@ class SarcasmDataModule(pl.LightningDataModule):
 
         train_df, val_df, test_df = self.split_datasets(df)
 
+        print("training dataset class distribution:")
+        for label in ["is_sarcastic"]:
+            train_class_counts = train_df[label].value_counts()
+            print(f"{label}:")
+            print(train_class_counts)
+
+        print("validation dataset class distribution:")
+        for label in ["is_sarcastic"]:
+            val_class_counts = val_df[label].value_counts()
+            print(f"{label}:")
+            print(val_class_counts)
+
+        print("test dataset class distribution:")
+        for label in ["is_sarcastic"]:
+            test_class_counts = test_df[label].value_counts()
+            print(f"{label}:")
+            print(test_class_counts)
+
         self.data_train = train_df.to_dict("records")
         self.data_val = val_df.to_dict("records")
         self.data_test = test_df.to_dict("records")
@@ -158,7 +176,7 @@ class ElectraClassifier(pl.LightningModule):
         self.best_val_performance = -np.inf
         self.epochs_since_best_performance = 0
         self.patience = 2
-        self.current_unfreeze_idx = int(len(list(self.model.electra.parameters())))
+        self.current_unfreeze_idx = len(list(self.model.electra.parameters())) - 1
         self.unfreeze_step = 1
         # self.epoch_train_losses = []
 
@@ -197,12 +215,8 @@ class ElectraClassifier(pl.LightningModule):
 
     def on_train_batch_start(self, batch, batch_idx):
         if self.global_step == self.warmup_steps:
-            # unfreeze base layers
-            self.current_unfreeze_idx = int(len(list(self.model.electra.parameters())) * 0.9)
-            self.unfreeze_next_layer()
-
             optimizer = self.optimizers()
-            freeze_idx = int(len(list(self.model.electra.parameters())) * 0.9)
+            freeze_idx = int(len(list(self.model.electra.parameters())) * 0.98)
 
             for idx, param_group in enumerate(optimizer.param_groups):
                 if self.global_step < self.warmup_steps:
@@ -223,6 +237,7 @@ class ElectraClassifier(pl.LightningModule):
         self.log("train_accuracy", acc, on_step=True, on_epoch=True, prog_bar=True)
         self.log("train_precision", prec, on_step=True, on_epoch=True, prog_bar=True)
         self.log("train_recall", rec, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("learning_rate", self.learning_rate, on_step=True, on_epoch=True, prog_bar=True)
 
         # self.epoch_train_losses.append(loss)
         return loss
@@ -245,33 +260,40 @@ class ElectraClassifier(pl.LightningModule):
         self.log("val_accuracy", acc, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_precision", prec, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_recall", rec, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("learning_rate", self.learning_rate, on_step=True, on_epoch=True, prog_bar=True)
 
         self.val_loss = loss.item()
 
     def on_validation_epoch_end(self):
+        print("on_validation_epoch_end called")
         current_val_performance = self.val_loss
+        improvement_threshold = 0.01
+        improvement = self.best_val_performance - current_val_performance
         if current_val_performance > self.best_val_performance:
             self.best_val_performance = current_val_performance
             self.epochs_since_best_performance = 0
         else:
             self.epochs_since_best_performance += 1
 
-        if self.epochs_since_best_performance >= self.patience:
+        if improvement >= improvement_threshold and self.global_step >= self.warmup_steps:
             self.unfreeze_next_layer()
 
     def unfreeze_next_layer(self):
         num_params = len(list(self.model.electra.parameters()))
-        freeze_idx = int(num_params * 0.9)
+        freeze_idx = int(num_params * 0.98)
         unfreeze_idx = self.current_unfreeze_idx
 
-        if unfreeze_idx < freeze_idx:
-            self.current_unfreeze_idx += self.unfreeze_step
+        print(f"unfreeze_idx: {unfreeze_idx}, freeze_idx: {freeze_idx}")
 
-            for idx, param in enumerate(self.model.electra.parameters()):
-                if idx >= unfreeze_idx and idx < self.current_unfreeze_idx:
-                    param_requires_grad = True
+        if self.current_unfreeze_idx >= 0 and self.current_unfreeze_idx >= freeze_idx:
+            param = list(self.model.electra.parameters())[unfreeze_idx]
+            param.requires_grad = True
+            print(f"unfroze layer idx {self.current_unfreeze_idx - 1}")
+            self.current_unfreeze_idx -= self.unfreeze_step
 
-            print(f"unfroze layers up to idx {self.current_unfreeze_idx}")
+        print("layer-wise requires_grad status:")
+        for idx, param in enumerate(self.model.electra.parameters()):
+            print(f"layer{idx}: {param.requires_grad}")
 
     def test_step(self, batch, batch_idx):
         input_ids, attention_mask, labels = batch
@@ -282,8 +304,8 @@ class ElectraClassifier(pl.LightningModule):
         self.predictions.append(preds.detach().cpu())
         self.targets.append(labels.detach().cpu())
         f1_score = self.f1(preds, labels)
-        print("logits test_step:", outputs.logits)
-        print("predictions test_step:", preds)
+        # print("logits test_step:", outputs.logits)
+        # print("predictions test_step:", preds)
         self.log("test_f1", f1_score, on_step=True, on_epoch=True, prog_bar=True)
         self.log("test_accuracy", acc, on_step=True, on_epoch=True, prog_bar=True)
 
@@ -352,20 +374,6 @@ class ElectraClassifier(pl.LightningModule):
             "lr_scheduler": scheduler_with_warmup,
             "monitor": "train_loss",
         }
-
-        # scheduler = get_linear_schedule_with_warmup(
-        #     optimizer,
-        #     num_warmup_steps=self.warmup_steps,
-        #     num_training_steps=num_training_steps,
-        # )
-        # return {
-        #     "optimizer": optimizer,
-        #     "lr_scheduler": {
-        #         "scheduler": scheduler,
-        #         "interval": "step",
-        #     },
-        #     "monitor": "train_loss",
-        # }
 
     def update_classification_head(self, num_labels):
         self.model.classifier = ElectraClassificationHead(self.model.config, num_labels)
