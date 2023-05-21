@@ -31,7 +31,7 @@ from transformers.models.electra.modeling_electra import ElectraClassificationHe
 data_path = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/Sarcasm_Headlines_Dataset_v2.json"
 sub_data_path_train = "/workspaces/sarcasm_detection/notebooks/project_data/train.csv"
 sub_data_path_test = "/workspaces/sarcasm_detection/notebooks/project_data/test.csv"
-version_number = 5
+version_number = 6
 sub_version_number = 0
 current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/sarcasm_detection_finetune_ckpt_v{version_number}_{current_time}.ckpt"
