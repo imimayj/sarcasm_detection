@@ -12,3 +12,6 @@ finetuning-scheduler
 torchmetrics
 tensorboard
 pytorch-lightning-bolts
+nlpaug
+sentencepiece
+textattack

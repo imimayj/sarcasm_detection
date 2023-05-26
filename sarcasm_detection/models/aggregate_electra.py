@@ -3,6 +3,7 @@ import json
 import math
 import os
 import pickle
+import random
 import re
 import string
 import subprocess
@@ -17,6 +18,7 @@ import pandas as pd
 import pytorch_lightning as pl
 import sklearn
 import tensorboard
+import textattack
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,7 +26,7 @@ import torchmetrics
 import transformers
 from electra_classifier import ElectraClassifier, SarcasmDataModule, SarcasmDataset
 from finetuning_scheduler import FinetuningScheduler
-from nltk.corpus import stopwords
+from nltk.corpus import stopwords, wordnet
 from pytorch_lightning import Callback, Trainer
 from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelSummary
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -41,6 +43,8 @@ from textattack.transformations import (
     WordSwapRandomCharacterDeletion,
     WordSwapRandomCharacterInsertion,
 )
+
+# from textattack.transformations.sentence_transformations import BackTranslation
 from torch.nn import CrossEntropyLoss
 from torch.nn.functional import cross_entropy
 from torch.optim import AdamW
@@ -65,7 +69,7 @@ data_path = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/Sarcas
 sub_data_path_train = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/train.csv"
 sub_data_path_test = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/test.csv"
 version_number = 6
-sub_version_number = 8
+sub_version_number = 9
 current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/sarcasm_detection_finetune_ckpt_v{version_number}_{current_time}.ckpt"
 sub_checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/subcat_finetune_ckpt_v{sub_version_number}_{current_time}.ckpt"
@@ -87,25 +91,12 @@ class SubcategoryDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        # text = self.data[idx]["tweet"]
-        # keys = ["sarcasm", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]
-        # labels = [self.data[idx][key] for key in keys]
-        # encodings = self.tokenizer(
-        #     text,
-        #     max_length=self.max_length,
-        #     padding="max_length",
-        #     truncation=True,
-        #     return_attention_mask=True,
-        #     return_token_type_ids=False,
-        #     return_tensors="pt",
-        # )
-        # return encodings["input_ids"].squeeze(), encodings["attention_mask"].squeeze(), torch.tensor(labels)
-
         text_key = "tweet" if "tweet" in self.data[idx] else "text"
         text = self.data[idx][text_key]
 
         # text = self.data[idx]["tweet"]
-        keys = ["sarcasm", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]
+        # keys = ["sarcasm", "not_sarcastic", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]
+        keys = ["sarcasm", "not_sarcastic", "other"]
         labels = [self.data[idx][key] for key in keys]
         encodings = self.tokenizer(
             text,
@@ -124,14 +115,13 @@ class SubcategoryDataset(Dataset):
 
 
 class SarcasmSubDataModule(pl.LightningDataModule):
-    def __init__(self, data_path, batch_size, tokenizer="google/electra-small-discriminator", stage=None):
+    def __init__(self, data_path, batch_size, tokenizer="google/electra-small-discriminator"):
         super().__init__()
         self.train_data_path = data_path[0]
         self.test_data_path = data_path[1]
         self.tokenizer = ElectraTokenizer.from_pretrained(tokenizer)
         self.batch_size = batch_size
         self.collate_fn = self.default_collate_fn
-        self.stage = stage
         transformations = CompositeTransformation(
             [WordSwapExtend(), WordSwapRandomCharacterInsertion(), WordSwapRandomCharacterDeletion()]
         )
@@ -142,38 +132,10 @@ class SarcasmSubDataModule(pl.LightningDataModule):
             transformations_per_example=5,
             pct_words_to_swap=0.02,
         )
-        self.satire_augmenter = Augmenter(
+        self.other_augmenter = Augmenter(
             transformation=transformations,
             constraints=constraints,
-            transformations_per_example=50,
-            pct_words_to_swap=0.025,
-        )
-
-        self.irony_augmenter = Augmenter(
-            transformation=transformations,
-            constraints=constraints,
-            transformations_per_example=25,
-            pct_words_to_swap=0.02,
-        )
-
-        self.under_augmenter = Augmenter(
-            transformation=transformations,
-            constraints=constraints,
-            transformations_per_example=50,
-            pct_words_to_swap=0.02,
-        )
-
-        self.over_augmenter = Augmenter(
-            transformation=transformations,
-            constraints=constraints,
-            transformations_per_example=50,
-            pct_words_to_swap=0.02,
-        )
-
-        self.rhetq_augmenter = Augmenter(
-            transformation=transformations,
-            constraints=constraints,
-            transformations_per_example=50,
+            transformations_per_example=10,
             pct_words_to_swap=0.02,
         )
 
@@ -190,60 +152,41 @@ class SarcasmSubDataModule(pl.LightningDataModule):
         augmented_text = self.sarcasm_augmenter.augment(text)
         return augmented_text
 
-    def augment_irony_text(self, text):
-        augmented_text = self.irony_augmenter.augment(text)
+    def augment_other_text(self, text):
+        augmented_text = self.other_augmenter.augment(text)
         return augmented_text
 
-    def augment_satire_text(self, text):
-        augmented_text = self.satire_augmenter.augment(text)
-        return augmented_text
+    # def augment_data(self, df, augmenter):
+    #     aug_texts = []
+    #     aug_labels = []
 
-    def augment_under_text(self, text):
-        augmented_text = self.under_augmenter.augment(text)
-        return augmented_text
+    #     for index, row in df.iterrows():
+    #         # Applying data augmentation method
+    #         new_texts = augmenter.augment(row["tweet"])
 
-    def augment_over_text(self, text):
-        augmented_text = self.over_augmenter.augment(text)
-        return augmented_text
+    #         # Extend augmented texts and labels
+    #         aug_texts.extend(new_texts)
+    #         aug_labels.extend([row["sarcasm"]] * len(new_texts))
 
-    def augment_rhetq_text(self, text):
-        augmented_text = self.rhetq_augmenter.augment(text)
-        return augmented_text
+    #     # Creating new dataframe with augmented data
+    #     df_augmented = pd.DataFrame(
+    #         {
+    #             "tweet": aug_texts,
+    #             "sarcasm": aug_labels,
+    #         }
+    #     )
+
+    #     return df_augmented
 
     def augment_sarcasm_data(self, df):
         df["tweet"] = df["tweet"].apply(self.augment_sarcasm_text)
-        df_0_augmented = df.explode("tweet").reset_index(drop=True)
+        df_0_augmented = df.explode("tweet")
         return df_0_augmented
 
-    def augment_irony_data(self, df):
-        df["tweet"] = df["tweet"].apply(self.augment_irony_text)
-        df_0_augmented = df.explode("tweet").reset_index(drop=True)
-        return df_0_augmented
-
-    def augment_satire_data(self, df):
-        df["tweet"] = df["tweet"].apply(self.augment_satire_text)
-        df_0_augmented = df.explode("tweet").reset_index(drop=True)
-        return df_0_augmented
-
-    def augment_under_data(self, df):
-        df["tweet"] = df["tweet"].apply(self.augment_under_text)
-        df_0_augmented = df.explode("tweet").reset_index(drop=True)
-        return df_0_augmented
-
-    def augment_over_data(self, df):
-        df["tweet"] = df["tweet"].apply(self.augment_over_text)
-        df_0_augmented = df.explode("tweet").reset_index(drop=True)
-        return df_0_augmented
-
-    def augment_rhetq_data(self, df):
-        df["tweet"] = df["tweet"].apply(self.augment_rhetq_text)
-        df_0_augmented = df.explode("tweet").reset_index(drop=True)
-        return df_0_augmented
-
-    # def augment_other_data(self, df):
-    #     df["tweet"] = df["tweet"].apply(self.augment_other_text)
-    #     df_2_augmented = df.explode("tweet").reset_index(drop=True)
-    #     return df_2_augmented
+    def augment_other_data(self, df):
+        df["tweet"] = df["tweet"].apply(self.augment_other_text)
+        df_2_augmented = df.explode("tweet")
+        return df_2_augmented
 
     def remove_sarcasm_overlap(self, df):
         df_new = df.copy()
@@ -252,10 +195,21 @@ class SarcasmSubDataModule(pl.LightningDataModule):
             df_new.loc[(df_new["sarcasm"] == 1) & df_new[col] == 1, "sarcasm"] = 0
         return df_new
 
-    def load_and_preprocess_training_data(self):
+    def aggregate_cols(self, df):
+        aggregate_cols = ["satire", "irony", "overstatement", "understatement", "rhetorical_question"]
+        df["other"] = df[aggregate_cols].any(axis=1).astype("int32")
+        df = df.drop(columns=aggregate_cols)
+        return df
+
+    def gen_non_sarc(self, df):
+        df["not_sarcastic"] = ((df["sarcasm"] == 0) & (df["other"] == 0)).astype(int)
+        return df
+
+    def prepare_data(self):
+        aggregate_cols = ["satire", "irony", "overstatement", "understatement", "rhetorical_question"]
+
         x_col_types = {
             "tweet": "str",
-            # "sarcastic": "int32",
             "sarcasm": "int32",
             "irony": "int32",
             "satire": "int32",
@@ -263,6 +217,7 @@ class SarcasmSubDataModule(pl.LightningDataModule):
             "overstatement": "int32",
             "rhetorical_question": "int32",
         }
+
         df = (
             pd.read_csv(self.train_data_path)
             .drop(
@@ -275,46 +230,49 @@ class SarcasmSubDataModule(pl.LightningDataModule):
             .fillna(0)
             .astype(x_col_types)
         )
+
         df = self.remove_sarcasm_overlap(df)
+        df = self.aggregate_cols(df)
+
         df["tweet"] = df["tweet"].apply(
             lambda x: self.remove_contractions(self.remove_urls(self.remove_twitter_handles(x)))
         )
+        df = self.gen_non_sarc(df)
+
         train_df, val_df = self.split_datasets(df)
-
-        return train_df, val_df
-
-    def augment_data(self, train_df):
         df_sarcasm = train_df[train_df["sarcasm"] == 1]
-        df_irony = train_df[train_df["irony"] == 1]
-        df_satire = train_df[train_df["satire"] == 1]
-        df_overstatement = train_df[train_df["overstatement"] == 1]
-        df_understatement = train_df[train_df["understatement"] == 1]
-        df_rhet_q = train_df[train_df["rhetorical_question"] == 1]
+        df_other = train_df[train_df["other"] == 1]
+        df_ns = train_df[train_df["not_sarcastic"] == 1]
 
         df_sarcasm_augmented = self.augment_sarcasm_data(df_sarcasm)
-        df_irony_augmented = self.augment_irony_data(df_irony)
-        df_satire_augmented = self.augment_satire_data(df_satire)
-        df_overstatement_augmented = self.augment_over_data(df_overstatement)
-        df_understatement_augmented = self.augment_under_data(df_understatement)
-        df_rhetq_augmented = self.augment_rhetq_data(df_rhet_q)
+        df_other_augmented = self.augment_other_data(df_other)
 
-        train_df_augmented = pd.concat(
-            [
-                df_sarcasm_augmented,
-                df_irony_augmented,
-                df_satire_augmented,
-                df_overstatement_augmented,
-                df_understatement_augmented,
-                df_rhetq_augmented,
-            ]
-        )
+        train_df_augmented = pd.concat([df_ns, df_sarcasm_augmented, df_other_augmented])
 
-        return train_df_augmented
+        # augmented_other = self.augment_data(train_df[train_df["other"] == 1], self.other_augmenter)
+        # print("sarcasm value counts after other augmentation:")
+        # print(train_df_augmented_other["sarcasm"].value_counts())
 
-    def load_and_preprocess_test_data(self):
+        # # Apply the augmentation for 'sarcasm' class
+        # train_df_augmented_sarcasm = self.augment_data(train_df[train_df["sarcasm"] == 1], self.sarcasm_augmenter)train_df_
+
+        # Concatenate original and augmented dataframes
+        # train_df_augmented = pd.concat([train_df, train_df_augmented_other, train_df_augmented_sarcasm])
+
+        print("training dataset class distribution:")
+        for label in ["sarcasm", "not_sarcastic", "other"]:
+            train_class_counts = train_df_augmented[label].value_counts()
+            print(f"{label}:")
+            print(train_class_counts)
+
+        print("validation dataset class distribution:")
+        for label in ["sarcasm", "not_sarcastic", "other"]:
+            val_class_counts = val_df[label].value_counts()
+            print(f"{label}:")
+            print(val_class_counts)
+
         y_col_types = {
             "text": "str",
-            # "sarcastic": "int32",
             "sarcasm": "int32",
             "irony": "int32",
             "satire": "int32",
@@ -323,29 +281,31 @@ class SarcasmSubDataModule(pl.LightningDataModule):
             "rhetorical_question": "int32",
         }
 
-        test_df = (
-            pd.read_csv(self.test_data_path)
-            # .drop(columns=["irony", "satire", "understatement", "overstatement", "rhetorical_question"])
-            .fillna(0).astype(y_col_types)
-        )
-
+        test_df = pd.read_csv(self.test_data_path).fillna(0).astype(y_col_types)
         test_df = self.remove_sarcasm_overlap(test_df)
-
+        test_df = self.aggregate_cols(test_df)
+        test_df = self.gen_non_sarc(test_df)
         test_df["text"] = test_df["text"].apply(
             lambda x: self.remove_contractions(self.remove_urls(self.remove_twitter_handles(x)))
         )
+        # print("test dataset class distribution:")
+        # for label in ["sarcasm", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]:
+        #     test_class_counts = test_df[label].value_counts()
+        #     print(f"{label}:")
+        #     print(test_class_counts)
 
-        return test_df
+        # print(f"test df length: {len(train_df)}")
+        # print(f"Validation DataFrame length: {len(val_df)}")
+        # print(f"Test DataFrame length: {len(test_df)}")
+        # print(f"total df len: {len(train_df+val_df+test_df)}")
+        # print(len(df))
 
-    def compute_weights(self):
-        labels_list = [
-            "sarcasm",
-            "irony",
-            "satire",
-            "understatement",
-            "overstatement",
-            "rhetorical_question",
-        ]
+        self.data_train = train_df_augmented.to_dict("records")
+        self.data_val = val_df.to_dict("records")
+        self.data_test = test_df.to_dict("records")
+
+        labels_list = ["sarcasm", "not_sarcastic", "other"]
+
         y_train = [[record[label] for label in labels_list] for record in self.data_train]
         classes = list(set([item for sublist in y_train for item in sublist]))
         weights = []
@@ -356,72 +316,13 @@ class SarcasmSubDataModule(pl.LightningDataModule):
         class_weights = {cls: weight for cls, weight in zip(classes, weights)}
         sample_weights = [max([class_weights[label] for label in record]) for record in y_train]
         self.train_sample_weights = torch.DoubleTensor(sample_weights)
-        return class_weights
-
-    # def prepare_data(self):
-    #     if self.stage == "fit" or self.stage is None:
-    #         self.train_data, self.val_data = self.load_and_preprocess_training_data()
-    #         self.train_data = self.augment_data(self.train_data)
-    #         self.data_train = self.train_data.to_dict("records")
-    #         self.data_val = self.val_data.to_dict("records")
-
-    #     if self.stage == "test" or self.stage == "predict" or self.stage is None:
-    #         self.test_data = self.load_and_preprocess_test_data()
-    #         self.data_test = self.test_data.to_dict("records")
-
-    # print("training dataset class distribution:")
-    # for label in ["sarcasm", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]:
-    #     train_class_counts = train_df_augmented[label].value_counts()
-    #     print(f"{label}:")
-    #     print(train_class_counts)
-
-    # print("validation dataset class distribution:")
-    # for label in ["sarcasm", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]:
-    #     val_class_counts = val_df[label].value_counts()
-    #     print(f"{label}:")
-    #     print(val_class_counts)
-
-    # test_df["not_sarcastic"] = test_df["sarcasm"].map({0: 1, 1: 0})
-
-    # print("test dataset class distribution:")
-    # for label in ["sarcasm", "irony", "satire", "understatement", "overstatement", "rhetorical_question"]:
-    #     test_class_counts = test_df[label].value_counts()
-    #     print(f"{label}:")
-    #     print(test_class_counts)
-
-    # print(f"test df length: {len(train_df)}")
-    # print(f"Validation DataFrame length: {len(val_df)}")
-    # print(f"Test DataFrame length: {len(test_df)}")
-    # print(f"total df len: {len(train_df+val_df+test_df)}")
-    # print(len(df))
 
     def setup(self, stage: str = None):
         if stage == "fit":
-            self.train_data, self.val_data = self.load_and_preprocess_training_data()
-            self.train_data = self.augment_data(self.train_data)
-            self.data_train = self.train_data.to_dict("records")
-            self.data_val = self.val_data.to_dict("records")
-            labels_list = [
-                "sarcasm",
-                "irony",
-                "satire",
-                "understatement",
-                "overstatement",
-                "rhetorical_question",
-            ]
-            print("Train data class distributions:")
-            for label in labels_list:
-                print(f"{label}: ", self.train_data[label].value_counts().to_dict())
-            print("\nValidation data class distributions:")
-            for label in labels_list:
-                print(f"{label}: ", self.val_data[label].value_counts().to_dict())
-            self.compute_weights()  # compute weights here
             self.train_dataset = SubcategoryDataset(self.data_train, self.tokenizer)
             self.val_dataset = SubcategoryDataset(self.data_val, self.tokenizer)
 
         if stage == "test":
-            self.test_data = self.load_and_preprocess_test_data()
-            self.data_test = self.test_data.to_dict("records")
             self.test_dataset = SubcategoryDataset(self.data_test, self.tokenizer)
 
         if stage == "predict":
@@ -469,11 +370,11 @@ class CustomElectraClassifier(ElectraClassifier):
 
         self.save_hyperparameters(serialiazable_hparams)
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        class_counts = np.array([2200, 3060, 480, 240, 740, 1820])
-        inverse_counts = 1 / class_counts
-        weights = inverse_counts / np.sum(inverse_counts)
-        class_weights = torch.tensor(weights, dtype=torch.float).to(device)
+        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # class_counts = np.array([545, 2229, 124, 20, 7, 29, 77])
+        # inverse_counts = 1 / class_counts
+        # weights = inverse_counts / np.sum(inverse_counts)
+        # class_weights = torch.tensor(weights, dtype=torch.float).to(device)
 
         # self.model = model_name.from_pretrained(model_name, num_labels=num_labels)
         self.data_module = data_module
@@ -483,14 +384,21 @@ class CustomElectraClassifier(ElectraClassifier):
         self.learning_rate = learning_rate
         self.classifier = self.model.classifier
         # self.loss_fct = nn.BCEWithLogitsLoss()
-        self.loss_fct = nn.CrossEntropyLoss()
+        # self.loss_fct = nn.CrossEntropyLoss()
         self.predictions = []
         self.f1_macro_scores = []
         self.f1_classes_scores = []
         self.num_labels = num_labels
-        self.dropout = nn.Dropout(0.15)
-        self.weights = class_weights
-        # self.loss_fct = nn.CrossEntropyLoss(weight=self.weights)
+        # self.dropout = nn.Dropout(0.15)
+        # self.weights = class_weights
+        self.loss_fct = nn.CrossEntropyLoss()
+
+        # self.additional_layer_1 = electra_classifier.additional_layer_1
+        # self.activation = electra_classifier.activation
+        # self.classifier = nn.Linear(64, num_labels)
+        # self.dropout = nn.Dropout(0)
+        # self.predictions = []
+        # self.targets = []
 
         for param in self.electra.base_model.parameters():
             param.requires_grad = False
@@ -511,6 +419,11 @@ class CustomElectraClassifier(ElectraClassifier):
 
         self.test_f1_macro = F1Score(task="multiclass", num_classes=self.num_labels, average="macro")
         self.test_f1_classes = F1Score(task="multiclass", num_classes=self.num_labels, average=None)
+
+        # for adding smaller networks on top
+        # self.dropout = nn.Dropout(0.1)
+        # self.fc1 = nn.Linear(self.electra.config.hidden_size, 128)
+        # self.fc2 = nn.Linear(128, num_labels)
 
     @property
     def electra(self):
@@ -536,12 +449,26 @@ class CustomElectraClassifier(ElectraClassifier):
 
     def forward(self, input_ids, attention_mask, labels=None):
         outputs = self.electra(input_ids, attention_mask=attention_mask)
-        dropout_outputs = self.dropout(outputs[0])
-        logits = self.classifier(dropout_outputs)
+        # dropout_outputs = self.dropout(outputs[0])
+        # logits = self.classifier(dropout_outputs)
+        logits = self.classifier(outputs[0])
+        # logits = self.classifier(outputs[0])
+        # print(f"logits shape: {logits.shape}")
+
+        # if labels is not None:
+        #     loss = self.loss_fct(logits, labels.float())
+        #     # loss = self.loss_fct(logits.view(-1, self.num_labels), labels)
+        #     return loss
+        # else:
+        #     return logits
 
         if labels is not None:
-            loss = self.loss_fct(logits, labels.float())
-            loss_labels = torch.argmax(labels, dim=-1)
+            class_idx_labels = torch.argmax(labels, dim=-1)
+            loss = self.loss_fct(logits, class_idx_labels)
+            # loss_labels = torch.argmax(labels, dim=-1)
+            # print("Logits shape:", logits.shape)
+            # print("Labels shape:", labels.shape)
+            # loss = self.loss_fct(logits, labels)
             return loss, logits
         else:
             return logits
@@ -684,18 +611,18 @@ class CustomElectraClassifier(ElectraClassifier):
 
     def configure_optimizers(self):
         optimizer = AdamW(self.parameters(), lr=self.hparams.learning_rate)
-        return optimizer
-        # scheduler = ReduceLROnPlateau(optimizer, mode="max", factor=0.1, patience=3, verbose=True)
-        # return {
-        #     "optimizer": optimizer,
-        #     "lr_scheduler": {
-        #         "scheduler": scheduler,
-        #         "monitor": "val_f1_macro",
-        #         "interval": "epoch",
-        #         "frequency": 1,
-        #         "strict": True,
-        #     },
-        # }
+        # return optimizer
+        scheduler = ReduceLROnPlateau(optimizer, mode="max", factor=0.1, patience=3, verbose=True)
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "val_f1_macro",
+                "interval": "epoch",
+                "frequency": 1,
+                "strict": True,
+            },
+        }
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -748,7 +675,7 @@ def load_model(transfer_data_module, saved_data_module):  # also saved_data_modu
         transfer_model = CustomElectraClassifier(
             electra_classifier=loaded_model,
             data_module=transfer_data_module,
-            num_labels=6,
+            num_labels=3,
             batch_size=transfer_data_module.batch_size,
             learning_rate=5e-6,
         )
