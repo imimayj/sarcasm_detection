@@ -43,7 +43,7 @@ from textattack.transformations import (
 )
 from torch.nn import CrossEntropyLoss
 from torch.nn.functional import cross_entropy
-from torch.optim import AdamW
+from torch.optim import AdamW, RAdam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Dataset, TensorDataset, WeightedRandomSampler, random_split
 from torchmetrics import Accuracy, F1Score, Precision, Recall
@@ -64,11 +64,11 @@ from transformers.models.electra.modeling_electra import ElectraClassificationHe
 data_path = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/Sarcasm_Headlines_Dataset_v2.json"
 sub_data_path_train = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/train.csv"
 sub_data_path_test = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/test.csv"
-version_number = 6
-sub_version_number = 8
+version_number = 8
+sub_version_number = 9
 current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/sarcasm_detection_finetune_ckpt_v{version_number}_{current_time}.ckpt"
-sub_checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/subcat_finetune_ckpt_v{sub_version_number}_{current_time}.ckpt"
+checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/fine_tuned/sarcasm_detection_finetune_ckpt_v{version_number}_{current_time}.ckpt"
+sub_checkpoint_path = f"/workspaces/sarcasm_detection/notebooks/checkpoints/custom_trained/subcat_finetune_ckpt_v{sub_version_number}_{current_time}.ckpt"
 checkpoint_directory = os.path.dirname(checkpoint_path)
 logdir = "/workspaces/sarcasm_detection/sarcasm_detection/tb_logs"
 save_directory = (
@@ -252,6 +252,13 @@ class SarcasmSubDataModule(pl.LightningDataModule):
             df_new.loc[(df_new["sarcasm"] == 1) & df_new[col] == 1, "sarcasm"] = 0
         return df_new
 
+    def remove_irony_overlap(self, df):
+        df_new = df.copy()
+        aggregated_cols = ["satire", "overstatement", "understatement", "rhetorical_question"]
+        for col in aggregated_cols:
+            df_new.loc[(df_new["irony"] == 1) & df_new[col] == 1, "irony"] = 0
+        return df_new
+
     def load_and_preprocess_training_data(self):
         x_col_types = {
             "tweet": "str",
@@ -276,6 +283,7 @@ class SarcasmSubDataModule(pl.LightningDataModule):
             .astype(x_col_types)
         )
         df = self.remove_sarcasm_overlap(df)
+        df = self.remove_irony_overlap(df)
         df["tweet"] = df["tweet"].apply(
             lambda x: self.remove_contractions(self.remove_urls(self.remove_twitter_handles(x)))
         )
@@ -470,7 +478,7 @@ class CustomElectraClassifier(ElectraClassifier):
         self.save_hyperparameters(serialiazable_hparams)
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        class_counts = np.array([2200, 3060, 480, 240, 740, 1820])
+        class_counts = np.array([2200, 2400, 1000, 400, 1450, 3900])
         inverse_counts = 1 / class_counts
         weights = inverse_counts / np.sum(inverse_counts)
         class_weights = torch.tensor(weights, dtype=torch.float).to(device)
@@ -483,14 +491,14 @@ class CustomElectraClassifier(ElectraClassifier):
         self.learning_rate = learning_rate
         self.classifier = self.model.classifier
         # self.loss_fct = nn.BCEWithLogitsLoss()
-        self.loss_fct = nn.CrossEntropyLoss()
+        # self.loss_fct = nn.CrossEntropyLoss()
         self.predictions = []
         self.f1_macro_scores = []
         self.f1_classes_scores = []
         self.num_labels = num_labels
         self.dropout = nn.Dropout(0.15)
         self.weights = class_weights
-        # self.loss_fct = nn.CrossEntropyLoss(weight=self.weights)
+        self.loss_fct = nn.CrossEntropyLoss(weight=self.weights)
 
         for param in self.electra.base_model.parameters():
             param.requires_grad = False
@@ -683,8 +691,27 @@ class CustomElectraClassifier(ElectraClassifier):
         return self.optimizers().param_groups[0]["lr"]
 
     def configure_optimizers(self):
-        optimizer = AdamW(self.parameters(), lr=self.hparams.learning_rate)
+        # optimizer = AdamW(self.parameters(), lr=self.hparams.learning_rate)
+        # return optimizer
+
+        optimizer = RAdam(self.parameters(), lr=self.hparams.learning_rate, weight_decay=0.01)
         return optimizer
+        # num_training_steps = len(self.train_dataloader()) * self.trainer.max_epochs
+
+        # # OneCycleLR
+        # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        #     optimizer,
+        #     max_lr=2 * self.hparams.learning_rate,  # The learning rate at the peak of the cycle
+        #     total_steps=num_training_steps,  # The total number of steps in the cycle
+        #     anneal_strategy="linear",  # Strategy for decreasing learning rate at end of cycle ('cos' or 'linear')
+        # )
+
+        # return {
+        #     "optimizer": optimizer,
+        #     "lr_scheduler": scheduler,
+        #     "monitor": "val_loss",
+        # }
+
         # scheduler = ReduceLROnPlateau(optimizer, mode="max", factor=0.1, patience=3, verbose=True)
         # return {
         #     "optimizer": optimizer,

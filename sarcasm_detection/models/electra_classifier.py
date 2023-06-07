@@ -31,11 +31,11 @@ from transformers.models.electra.modeling_electra import ElectraClassificationHe
 data_path = "/workspaces/sarcasm_detection/sarcasm_detection/project_data/Sarcasm_Headlines_Dataset_v2.json"
 sub_data_path_train = "/workspaces/sarcasm_detection/notebooks/project_data/train.csv"
 sub_data_path_test = "/workspaces/sarcasm_detection/notebooks/project_data/test.csv"
-version_number = 7
-sub_version_number = 7
+version_number = 8
+sub_version_number = 9
 current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/sarcasm_detection_finetune_ckpt_v{version_number}_{current_time}.ckpt"
-sub_checkpoint_path = f"/workspaces/sarcasm_detection/notebooks/checkpoints/subcat_finetune_ckpt_v{sub_version_number}_{current_time}.ckpt"
+checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/fine_tuned/sarcasm_detection_finetune_ckpt_v{version_number}_{current_time}.ckpt"
+sub_checkpoint_path = f"/workspaces/sarcasm_detection/notebooks/checkpoints/custom_trained/subcat_finetune_ckpt_v{sub_version_number}_{current_time}.ckpt"
 checkpoint_directory = os.path.dirname(checkpoint_path)
 logdir = "/workspaces/sarcasm_detection/sarcasm_detection/tb_logs"
 save_directory = (
