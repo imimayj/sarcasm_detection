@@ -7,66 +7,35 @@ used for assessing the base fine-tuned ELECTRA model on the Semeval 2022 dataset
 
 import datetime
 import json
-import math
 import os
-import pickle
 import re
-import string
 import subprocess
-from pathlib import Path
 
 import contractions
-import evaluate
-import matplotlib.pyplot as plt
-import nltk
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
-import sklearn
-import tensorboard
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchmetrics
-import transformers
-from electra_classifier import ElectraClassifier, SarcasmDataModule, SarcasmDataset
-from finetuning_scheduler import FinetuningScheduler
-from nltk.corpus import stopwords
+from electra_classifier import ElectraClassifier, SarcasmDataModule
 from pytorch_lightning import Callback, Trainer
-from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelSummary
+from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.utils import compute_class_weight
-from textattack.augmentation import Augmenter, CharSwapAugmenter, DeletionAugmenter, EasyDataAugmenter, WordNetAugmenter
+from textattack.augmentation import Augmenter
 from textattack.constraints.pre_transformation import RepeatModification, StopwordModification
 from textattack.transformations import (
-    BackTranslation,
     CompositeTransformation,
-    WordSwapEmbedding,
     WordSwapExtend,
-    WordSwapQWERTY,
     WordSwapRandomCharacterDeletion,
     WordSwapRandomCharacterInsertion,
 )
-from torch.nn import CrossEntropyLoss
-from torch.nn.functional import cross_entropy
-from torch.optim import AdamW, RAdam
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import DataLoader, Dataset, TensorDataset, WeightedRandomSampler, random_split
-from torchmetrics import Accuracy, F1Score, Precision, Recall
-from torchmetrics.classification import BinaryAccuracy, BinaryF1Score
-from transformers import (  # cosine_schedule_with_warmup,; get_linear_schedule_with_warmup,
-    AdamW,
-    AutoTokenizer,
-    DataCollatorWithPadding,
-    ElectraConfig,
-    ElectraForSequenceClassification,
-    ElectraModel,
-    ElectraTokenizer,
-    TrainingArguments,
-)
-from transformers.modeling_outputs import SequenceClassifierOutput
+from torch.optim import RAdam
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torchmetrics import F1Score, Precision, Recall
+from transformers import ElectraTokenizer
 from transformers.models.electra.modeling_electra import ElectraClassificationHead
 
 # Defining global variables
@@ -81,9 +50,7 @@ checkpoint_path = f"/workspaces/sarcasm_detection/sarcasm_detection/checkpoints/
 sub_checkpoint_path = f"/workspaces/sarcasm_detection/notebooks/checkpoints/custom_trained/subcat_finetune_ckpt_v{sub_version_number}_{current_time}.ckpt"
 checkpoint_directory = os.path.dirname(checkpoint_path)
 logdir = "/workspaces/sarcasm_detection/sarcasm_detection/tb_logs"
-save_directory = (
-    f"/workspaces/sarcasm_detection/sarcasm_detection/saved_models/sarcasm_model_v{version_number}_{current_time}"
-)
+save_directory = f"/workspaces/sarcasm_detection/sarcasm_detection/saved_models/custom_electra_model_v{version_number}_{current_time}"
 
 
 # data module
@@ -223,7 +190,7 @@ class SarcasmSubDataModule(pl.LightningDataModule):
         self.rhetq_augmenter = Augmenter(
             transformation=transformations,
             constraints=constraints,
-            transformations_per_example=50,
+            transformations_per_example=40,
             pct_words_to_swap=0.02,
         )
 
@@ -356,7 +323,7 @@ class SarcasmSubDataModule(pl.LightningDataModule):
         df_new = df.copy()
         aggregated_cols = ["understatement"]
         for col in aggregated_cols:
-            df_new.loc[(df_new["rhetorical_question"] == 1) & df_new[col] == 1, "rhetorical_question"] = 0
+            df_new.loc[(df_new["rhetorical_question"] == 1) & (df_new[col] == 1), "rhetorical_question"] = 0
         return df_new
 
     # unused function for creating a not_sarcastic class, which led to inferior results
@@ -424,23 +391,25 @@ class SarcasmSubDataModule(pl.LightningDataModule):
             "overstatement",
             "rhetorical_question",
         ]
+        # Remove non-sarcastic samples from the dataset
+        df = df.loc[~(df[labels_list] == 0).all(axis=1)]
 
         # Print statements to verify that each stage is being applied correctly
-        print("dataset class distributions before sarcasm overlap removal:")
-        for label in labels_list:
-            print(f"{label}: ", df[label].value_counts().to_dict())
-        df = self.remove_sarcasm_overlap(df)
-        print("dataset class distributions after sarcasm removal and before irony removal:")
-        for label in labels_list:
-            print(f"{label}: ", df[label].value_counts().to_dict())
-        df = self.remove_irony_overlap(df)
-        print("dataset class distribution after sarcasm and irony removal:")
-        for label in labels_list:
-            print(f"{label}: ", df[label].value_counts().to_dict())
-        df = self.remove_rhetq_overlap(df)
-        print("dataset class distribution after sarcasm, irony, and rhetq removal:")
-        for label in labels_list:
-            print(f"{label}: ", df[label].value_counts().to_dict())
+        # print("dataset class distributions before sarcasm overlap removal:")
+        # for label in labels_list:
+        #     print(f"{label}: ", df[label].value_counts().to_dict())
+        # df = self.remove_sarcasm_overlap(df)
+        # print("dataset class distributions after sarcasm removal and before irony removal:")
+        # for label in labels_list:
+        #     print(f"{label}: ", df[label].value_counts().to_dict())
+        # df = self.remove_irony_overlap(df)
+        # print("dataset class distribution after sarcasm and irony removal:")
+        # for label in labels_list:
+        #     print(f"{label}: ", df[label].value_counts().to_dict())
+        # df = self.remove_rhetq_overlap(df)
+        # print("dataset class distribution after sarcasm, irony, and rhetq removal:")
+        # for label in labels_list:
+        #     print(f"{label}: ", df[label].value_counts().to_dict())
 
         # Applying the preprocessing functions delineated above
         df["tweet"] = df["tweet"].apply(
@@ -451,12 +420,12 @@ class SarcasmSubDataModule(pl.LightningDataModule):
         train_df, val_df = self.split_datasets(df)
 
         # Print statements for verifying that augmentation is being correctly applied
-        print("train dataset class distribution before augmentation:")
-        for label in labels_list:
-            print(f"{label}: ", train_df[label].value_counts().to_dict())
-        print("val dataset class distribution before augmentation:")
-        for label in labels_list:
-            print(f"{label}: ", val_df[label].value_counts().to_dict())
+        # print("train dataset class distribution before augmentation:")
+        # for label in labels_list:
+        #     print(f"{label}: ", train_df[label].value_counts().to_dict())
+        # print("val dataset class distribution before augmentation:")
+        # for label in labels_list:
+        #     print(f"{label}: ", val_df[label].value_counts().to_dict())
 
         # return datasets for later use
         return train_df, val_df
@@ -535,11 +504,12 @@ class SarcasmSubDataModule(pl.LightningDataModule):
             "overstatement",
             "rhetorical_question",
         ]
+        test_df = test_df.loc[~(test_df[labels_list] == 0).all(axis=1)]
 
         # Print class samples before overlap removal
-        print("test dataset class distribution:")
-        for label in labels_list:
-            print(f"{label}: ", test_df[label].value_counts().to_dict())
+        # print("test dataset class distribution:")
+        # for label in labels_list:
+        #     print(f"{label}: ", test_df[label].value_counts().to_dict())
 
         # Apply overlap removal functions
         test_df = self.remove_sarcasm_overlap(test_df)
@@ -547,9 +517,9 @@ class SarcasmSubDataModule(pl.LightningDataModule):
         test_df = self.remove_rhetq_overlap(test_df)
 
         # Print the class samples after overlap removal
-        print("test dataset class distribution:")
-        for label in labels_list:
-            print(f"{label}: ", test_df[label].value_counts().to_dict())
+        # print("test dataset class distribution:")
+        # for label in labels_list:
+        #     print(f"{label}: ", test_df[label].value_counts().to_dict())
 
         # Apply aforementioned data preprocessing functions
         test_df["text"] = test_df["text"].apply(
@@ -630,12 +600,12 @@ class SarcasmSubDataModule(pl.LightningDataModule):
             ]
             # print the class distributions after augmentation/overlap etc has
             # been applied
-            print("Train data class distributions:")
-            for label in labels_list:
-                print(f"{label}: ", self.train_data[label].value_counts().to_dict())
-            print("\nValidation data class distributions:")
-            for label in labels_list:
-                print(f"{label}: ", self.val_data[label].value_counts().to_dict())
+            # print("Train data class distributions:")
+            # for label in labels_list:
+            #     print(f"{label}: ", self.train_data[label].value_counts().to_dict())
+            # print("\nValidation data class distributions:")
+            # for label in labels_list:
+            #     print(f"{label}: ", self.val_data[label].value_counts().to_dict())
 
             # compute the class weights
             self.compute_weights()
@@ -1276,5 +1246,8 @@ def main():
 
 
 # call main method
+if __name__ == "__main__":
+    main()
+
 if __name__ == "__main__":
     main()

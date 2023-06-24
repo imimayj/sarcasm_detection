@@ -11,27 +11,17 @@ import subprocess
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
-import tensorboard
 import torch
-import torch.nn as nn
-from nltk.corpus import stopwords
 from pytorch_lightning import Callback, Trainer
-from pytorch_lightning.callbacks import EarlyStopping, LearningRateFinder, LearningRateMonitor, ModelSummary
+from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 from sklearn.model_selection import train_test_split
-from torch.nn.functional import cross_entropy
-from torch.optim import AdamW, RAdam
-from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts
-from torch.utils.data import DataLoader, Dataset, TensorDataset, random_split
+from torch.optim import RAdam
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from torch.utils.data import DataLoader, Dataset
 from torchmetrics import Accuracy, Precision, Recall
-from torchmetrics.classification import BinaryAccuracy, BinaryF1Score
-from transformers import (
-    AdamW,
-    ElectraForSequenceClassification,
-    ElectraTokenizer,
-    get_cosine_schedule_with_warmup,
-    get_linear_schedule_with_warmup,
-)
+from torchmetrics.classification import BinaryF1Score
+from transformers import ElectraForSequenceClassification, ElectraTokenizer
 from transformers.models.electra.modeling_electra import ElectraClassificationHead
 
 # Defining global variables
@@ -423,8 +413,8 @@ class ElectraClassifier(pl.LightningModule):
         self.predictions.append(preds.detach().cpu())
         self.targets.append(labels.detach().cpu())
         f1_score = self.f1(preds, labels)
-        print("logits test_step:", outputs.logits)
-        print("predictions test_step:", preds)
+        # print("logits test_step:", outputs.logits)
+        # print("predictions test_step:", preds)
         self.log("test_f1", f1_score, on_step=True, on_epoch=True, prog_bar=True)
         self.log("test_accuracy", acc, on_step=True, on_epoch=True, prog_bar=True)
 
@@ -454,8 +444,8 @@ class ElectraClassifier(pl.LightningModule):
         self.predictions.append(preds.detach().cpu())
         self.targets.append(labels.detach().cpu())
         f1_score = self.f1(preds, labels)
-        print("logits test_step:", outputs.logits)
-        print("predictions test_step:", preds)
+        # print("logits test_step:", outputs.logits)
+        # print("predictions test_step:", preds)
         return preds, f1_score
 
     def on_predict_start(self):
@@ -631,10 +621,10 @@ def predict(model, data_module):
 
     predict_result = trainer.predict(model, data_module)
 
-    print(predict_result)
+    # print(predict_result)
 
     f1_scores = get_f1_scores(predict_result)
-    print(f"f1 score for predictions: {torch.IntTensor.item(f1_scores)}")
+    # print(f"f1 score for predictions: {torch.IntTensor.item(f1_scores)}")
 
 
 def launch_tensorboard(logdir):

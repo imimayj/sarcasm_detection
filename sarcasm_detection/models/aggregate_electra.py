@@ -8,70 +8,35 @@ ability to identify the 'sarcasm', 'not_sarcastic', and 'other' classes - where
 """
 
 import datetime
-import json
-import math
 import os
-import pickle
-import random
 import re
-import string
 import subprocess
-from pathlib import Path
 
 import contractions
-import evaluate
-import matplotlib.pyplot as plt
-import nltk
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
-import sklearn
-import tensorboard
-import textattack
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchmetrics
-import transformers
-from electra_classifier import ElectraClassifier, SarcasmDataModule, SarcasmDataset
-from finetuning_scheduler import FinetuningScheduler
-from nltk.corpus import stopwords, wordnet
+from electra_classifier import ElectraClassifier, SarcasmDataModule
 from pytorch_lightning import Callback, Trainer
-from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelSummary
+from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
+from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.utils import compute_class_weight
-from textattack.augmentation import Augmenter, CharSwapAugmenter, DeletionAugmenter, EasyDataAugmenter, WordNetAugmenter
+from textattack.augmentation import Augmenter
 from textattack.constraints.pre_transformation import RepeatModification, StopwordModification
 from textattack.transformations import (
-    BackTranslation,
     CompositeTransformation,
-    WordSwapEmbedding,
     WordSwapExtend,
-    WordSwapQWERTY,
     WordSwapRandomCharacterDeletion,
     WordSwapRandomCharacterInsertion,
 )
-
-# from textattack.transformations.sentence_transformations import BackTranslation
-from torch.nn import CrossEntropyLoss
-from torch.nn.functional import cross_entropy
-from torch.optim import AdamW, RAdam
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, ReduceLROnPlateau, StepLR
-from torch.utils.data import DataLoader, Dataset, TensorDataset, WeightedRandomSampler, random_split
-from torchmetrics import Accuracy, F1Score, Precision, Recall
-from torchmetrics.classification import BinaryAccuracy, BinaryF1Score
-from transformers import (  # cosine_schedule_with_warmup,; get_linear_schedule_with_warmup,
-    AdamW,
-    AutoTokenizer,
-    DataCollatorWithPadding,
-    ElectraConfig,
-    ElectraForSequenceClassification,
-    ElectraModel,
-    ElectraTokenizer,
-    TrainingArguments,
-)
-from transformers.modeling_outputs import SequenceClassifierOutput
+from torch.optim import RAdam
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torchmetrics import F1Score, Precision, Recall
+from transformers import ElectraTokenizer
 from transformers.models.electra.modeling_electra import ElectraClassificationHead
 
 # Defining global variables
@@ -305,11 +270,11 @@ class SarcasmSubDataModule(pl.LightningDataModule):
         df_ns = train_df[train_df["not_sarcastic"] == 1]
 
         # print sample distribution
-        print("training dataset class distribution before augmentation:")
-        for label in ["sarcasm", "not_sarcastic", "other"]:
-            train_class_counts = train_df[label].value_counts()
-            print(f"{label}:")
-            print(train_class_counts)
+        # print("training dataset class distribution before augmentation:")
+        # for label in ["sarcasm", "not_sarcastic", "other"]:
+        #     train_class_counts = train_df[label].value_counts()
+        #     print(f"{label}:")
+        #     print(train_class_counts)
 
         # augment sarcasm and other columns
         df_sarcasm_augmented = self.augment_sarcasm_data(df_sarcasm)
@@ -320,17 +285,17 @@ class SarcasmSubDataModule(pl.LightningDataModule):
 
         # print training and validation dataset distribution after augmentation
         # (applied only to training dataset)
-        print("training dataset class distribution:")
-        for label in ["sarcasm", "not_sarcastic", "other"]:
-            train_class_counts = train_df_augmented[label].value_counts()
-            print(f"{label}:")
-            print(train_class_counts)
+        # print("training dataset class distribution:")
+        # for label in ["sarcasm", "not_sarcastic", "other"]:
+        #     train_class_counts = train_df_augmented[label].value_counts()
+        #     print(f"{label}:")
+        #     print(train_class_counts)
 
-        print("validation dataset class distribution:")
-        for label in ["sarcasm", "not_sarcastic", "other"]:
-            val_class_counts = val_df[label].value_counts()
-            print(f"{label}:")
-            print(val_class_counts)
+        # print("validation dataset class distribution:")
+        # for label in ["sarcasm", "not_sarcastic", "other"]:
+        #     val_class_counts = val_df[label].value_counts()
+        #     print(f"{label}:")
+        #     print(val_class_counts)
 
         # set test dataset column types
         y_col_types = {
@@ -474,7 +439,7 @@ class CustomElectraClassifier(ElectraClassifier):
     training/validation/testing is executed in the correct way. This inherits
     from the ELECTRA Classifier, to ensure that the fine-tuned model can be used.
     It is almost exactly the same as the Custom ELECTRA Classifier, therefore
-    comments will only be provided where there is a difference in implementation
+    comments are only be provided where there is a difference in implementation
     """
 
     def __init__(self, data_module=None, batch_size=None, num_labels=None, electra_classifier=None, learning_rate=None):
@@ -589,18 +554,23 @@ class CustomElectraClassifier(ElectraClassifier):
             return logits
 
     def on_train_start(self):
+        # The same as in the Custom ELECTRA Classifier
         self.train_dataset_len = len(self.train_dataloader().dataset)
 
     def on_train_batch_start(self, batch, batch_idx):
+        # The same as in the Custom ELECTRA Classifier
         pass
 
     def on_validation_epoch_end(self):
+        # The same as in the Custom ELECTRA Classifier
         pass
 
     def unfreeze_next_layer(self):
+        # The same as in the Custom ELECTRA Classifier
         pass
 
     def training_step(self, batch, batch_idx):
+        # The same as in the Custom ELECTRA Classifier
         input_ids, attention_mask, labels = batch
         labels = labels.squeeze(1)
         loss, logits = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
@@ -621,6 +591,7 @@ class CustomElectraClassifier(ElectraClassifier):
         return loss
 
     def validation_step(self, batch, batch_idx):
+        # The same as in the Custom ELECTRA Classifier
         input_ids, attention_mask, labels = batch
         labels = labels.squeeze(1)
         loss, logits = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
@@ -640,6 +611,7 @@ class CustomElectraClassifier(ElectraClassifier):
             self.log(f"Class {i} F1", score, on_step=True, on_epoch=True, prog_bar=True)
 
     def test_step(self, batch, batch_idx):
+        # The same as in the Custom ELECTRA Classifier
         input_ids, attention_mask, labels = batch
         labels = labels.squeeze(1)
         loss, logits = self(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
@@ -661,12 +633,38 @@ class CustomElectraClassifier(ElectraClassifier):
             self.log(f"Class {i} F1", score, on_step=True, on_epoch=True, prog_bar=True)
 
     def on_test_start(self):
+        # The same as in the Custom ELECTRA Classifier
         self.predictions = []
         self.targets = []
 
     def on_test_epoch_end(self):
+        # The same as in the Custom ELECTRA Classifier
+        """
+        PTL callback called at the end of a test epoch, for computing and logging
+        metrics or calculations once test step is complete.
+        """
+        # Concatenate all predictions & true labels gathered during test step
+        # into two tensors.
         all_preds = torch.cat(self.predictions)
         all_labels = torch.cat(self.targets)
+
+        # Convert these tensors to a numpy array
+        all_preds_np = all_preds.numpy()
+        all_labels_np = all_labels.numpy()
+
+        # instantiate confusion matrix for evaluating the model's precision &
+        # recall manually
+        cm = confusion_matrix(all_labels_np, all_preds_np, labels=list(range(self.num_labels)))
+
+        # Calculate the true positives, true negatives, false positives, and
+        # false negatives for each class in the range of the number of labels
+        for i in range(self.num_labels):
+            tp = cm[i, i]
+            fp = cm[:, i].sum() - tp
+            fn = cm[i, :].sum() - tp
+            tn = cm.sum() - (fp + fn + tp)
+            print(f"Class {i}: TP={tp}, FP={fp}, FN={fn}, TN={tn}")
+
         return {"preds": all_preds, "labels": all_labels}
 
     def predict_step(self, batch, batch_idx):
@@ -834,14 +832,8 @@ def test(model, data_module):
     # The same as the Custom ELECTRA Classifier test function
     trainer = Trainer()
 
-    labels = []
-
-    for batch in data_module.test_dataloader():
-        inputs, label = batch
-        labels.extend(label.tolist())
-
     test_result = trainer.test(model, data_module)
-    return model.predictions, model.f1_macro_scores, model.f1_classes_scores, labels
+    return model.predictions, model.f1_macro_scores, model.f1_classes_scores
 
 
 def get_f1_scores(predictions, macro_f1_scores, classes_f1_scores):
@@ -892,6 +884,8 @@ def main():
         tensorboard_process = launch_tensorboard(logdir)
         transfer_model = fit(transfer_model, sub_data_module)
         tensorboard_process.terminate()
+
+        sub_data_module.setup("test")
         predictions, macro_f1_scores, classes_f1_scores = test(transfer_model, sub_data_module)
         predictions_list = tensor_to_native(predictions)
         f1_scores = get_f1_scores(predictions, macro_f1_scores, classes_f1_scores)
@@ -904,6 +898,9 @@ def main():
     else:
         print("failed to load the transfer model")
 
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()

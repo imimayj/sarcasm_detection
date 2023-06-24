@@ -8,70 +8,35 @@ transfer learning-based Custom ELECTRA Classifier
 
 import datetime
 import json
-import math
 import os
-import pickle
-import random
 import re
-import string
 import subprocess
-from pathlib import Path
 
 import contractions
-import evaluate
-import matplotlib.pyplot as plt
-import nltk
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
-import sklearn
-import tensorboard
-import textattack
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchmetrics
-import transformers
-from electra_classifier import ElectraClassifier, SarcasmDataModule, SarcasmDataset
-from finetuning_scheduler import FinetuningScheduler
-from nltk.corpus import stopwords, wordnet
+from electra_classifier import ElectraClassifier
 from pytorch_lightning import Callback, Trainer
-from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelSummary
+from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
+from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.utils import compute_class_weight
-from textattack.augmentation import Augmenter, CharSwapAugmenter, DeletionAugmenter, EasyDataAugmenter, WordNetAugmenter
+from textattack.augmentation import Augmenter
 from textattack.constraints.pre_transformation import RepeatModification, StopwordModification
 from textattack.transformations import (
-    BackTranslation,
     CompositeTransformation,
-    WordSwapEmbedding,
     WordSwapExtend,
-    WordSwapQWERTY,
     WordSwapRandomCharacterDeletion,
     WordSwapRandomCharacterInsertion,
 )
-
-# from textattack.transformations.sentence_transformations import BackTranslation
-from torch.nn import CrossEntropyLoss
-from torch.nn.functional import cross_entropy
-from torch.optim import AdamW, RAdam
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, ReduceLROnPlateau, StepLR
-from torch.utils.data import DataLoader, Dataset, TensorDataset, WeightedRandomSampler, random_split
-from torchmetrics import Accuracy, F1Score, Precision, Recall
-from torchmetrics.classification import BinaryAccuracy, BinaryF1Score
-from transformers import (  # cosine_schedule_with_warmup,; get_linear_schedule_with_warmup,
-    AdamW,
-    AutoTokenizer,
-    DataCollatorWithPadding,
-    ElectraConfig,
-    ElectraForSequenceClassification,
-    ElectraModel,
-    ElectraTokenizer,
-    TrainingArguments,
-)
-from transformers.modeling_outputs import SequenceClassifierOutput
-from transformers.models.electra.modeling_electra import ElectraClassificationHead
+from torch.optim import RAdam
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torchmetrics import F1Score, Precision, Recall
+from transformers import ElectraForSequenceClassification, ElectraTokenizer
 
 # Defining global variables
 
@@ -333,6 +298,17 @@ class SarcasmSubDataModule(pl.LightningDataModule):
             .fillna(0)
             .astype(x_col_types)
         )
+        labels_list = [
+            "sarcasm",
+            "irony",
+            "satire",
+            "understatement",
+            "overstatement",
+            "rhetorical_question",
+        ]
+        # remove non-sarcastic samples from dataset
+        df = df.loc[~(df[labels_list] == 0).all(axis=1)]
+
         df = self.remove_sarcasm_overlap(df)
         df = self.remove_irony_overlap(df)
         df["tweet"] = df["tweet"].apply(
@@ -392,6 +368,16 @@ class SarcasmSubDataModule(pl.LightningDataModule):
         test_df["text"] = test_df["text"].apply(
             lambda x: self.remove_contractions(self.remove_urls(self.remove_twitter_handles(x)))
         )
+        labels_list = [
+            "sarcasm",
+            "irony",
+            "satire",
+            "understatement",
+            "overstatement",
+            "rhetorical_question",
+        ]
+        # remove non-sarcastic samples from dataset
+        test_df = test_df.loc[~(test_df[labels_list] == 0).all(axis=1)]
 
         return test_df
 
@@ -432,12 +418,12 @@ class SarcasmSubDataModule(pl.LightningDataModule):
                 "overstatement",
                 "rhetorical_question",
             ]
-            print("Train data class distributions:")
-            for label in labels_list:
-                print(f"{label}: ", self.train_data[label].value_counts().to_dict())
-            print("\nValidation data class distributions:")
-            for label in labels_list:
-                print(f"{label}: ", self.val_data[label].value_counts().to_dict())
+            # print("Train data class distributions:")
+            # for label in labels_list:
+            #     print(f"{label}: ", self.train_data[label].value_counts().to_dict())
+            # print("\nValidation data class distributions:")
+            # for label in labels_list:
+            #     print(f"{label}: ", self.val_data[label].value_counts().to_dict())
             self.compute_weights()  # compute weights here
             self.train_dataset = SubcategoryDataset(self.data_train, self.tokenizer)
             self.val_dataset = SubcategoryDataset(self.data_val, self.tokenizer)
@@ -673,8 +659,32 @@ class ElectraClassifier(pl.LightningModule):
 
     def on_test_epoch_end(self):
         # The same as in the Custom ELECTRA Classifier
+        """
+        PTL callback called at the end of a test epoch, for computing and logging
+        metrics or calculations once test step is complete.
+        """
+        # Concatenate all predictions & true labels gathered during test step
+        # into two tensors.
         all_preds = torch.cat(self.predictions)
         all_labels = torch.cat(self.targets)
+
+        # Convert these tensors to a numpy array
+        all_preds_np = all_preds.numpy()
+        all_labels_np = all_labels.numpy()
+
+        # instantiate confusion matrix for evaluating the model's precision &
+        # recall manually
+        cm = confusion_matrix(all_labels_np, all_preds_np, labels=list(range(self.num_labels)))
+
+        # Calculate the true positives, true negatives, false positives, and
+        # false negatives for each class in the range of the number of labels
+        for i in range(self.num_labels):
+            tp = cm[i, i]
+            fp = cm[:, i].sum() - tp
+            fn = cm[i, :].sum() - tp
+            tn = cm.sum() - (fp + fn + tp)
+            print(f"Class {i}: TP={tp}, FP={fp}, FN={fn}, TN={tn}")
+
         return {"preds": all_preds, "labels": all_labels}
 
     def predict_step(self, batch, batch_idx):
@@ -786,8 +796,8 @@ def test(model, data_module):
 
 def get_f1_scores(predict_result, macro_f1_scores, classes_f1_scores):
     # The same as in the Custom ELECTRA Classifier
-    f1_scores = [f1_score for (_batch_preds, f1_score) in predict_result]
-    f1_scores = torch.mean(torch.stack(f1_scores))
+    macro_f1_scores = torch.mean(torch.stack(macro_f1_scores))
+    classes_f1_scores = torch.mean(torch.stack(classes_f1_scores))
     return macro_f1_scores, classes_f1_scores
 
 
@@ -845,5 +855,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # The same as in the Custom ELECTRA Classifier
+    main()
+
     # The same as in the Custom ELECTRA Classifier
     main()

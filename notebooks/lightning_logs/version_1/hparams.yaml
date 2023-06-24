@@ -1,3 +1,0 @@
-learning_rate: 2.0e-05
-model_name: google/electra-small-discriminator
-num_labels: 2
